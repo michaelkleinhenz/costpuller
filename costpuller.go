@@ -3,9 +3,11 @@ package main
 import (
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"strings"
@@ -102,10 +104,11 @@ func main() {
 			if err != nil {
 				log.Fatalf("[main] error parsing data from service: %v", err)
 			}
-			err = checkResponse(parsed)
+			err = checkResponseConsistency(parsed)
 			if err != nil {
-				log.Fatalf("[main] error checking plausability of response for account data %s: %v", account, err)
+				log.Fatalf("[main] error checking consistency of response for account data %s: %v", account, err)
 			}
+			log.Printf("[main] successful consistency check for data on account %s\n", account)
 			normalized, err := normalizeResponse(parsed)
 			if err != nil {
 				log.Fatalf("[main] error normalizing data from service: %v", err)
@@ -190,13 +193,38 @@ func normalizeResponse(response *Response) ([]string, error) {
 	return output, nil
 }
 
-func checkResponse(response *Response) error {
-	// TODO do plausability checks
-	// check date consistency
-	// check that there is at least one service entry
-	// check t hat there is exactly one value section in services
+func checkResponseConsistency(response *Response) error {
 	// check that there is exactly one entry in toplevel data
+	if len(response.Data) != 1 {
+		return fmt.Errorf("response data has length of %d instead of 1", len(response.Data))
+	}
+	// check that there is at least one service entry
+	if len(response.Data[0].Services) == 0 {
+		return errors.New("services array is empty")
+	}
+	var foundDate string = response.Data[0].Date
+	var foundUnit string = response.Meta.Total.Cost.Unit
+	var total float64 = 0
+	for _, service := range(response.Data[0].Services) {
+		// check that there is exactly one value section in services
+		if len(service.Values) != 1 {
+			return fmt.Errorf("service %s has more than exactly one values section (length is %d)", service.Service, len(service.Values))
+		}
+		// check date consistency
+		if foundDate != service.Values[0].Date {
+			return fmt.Errorf("service %s date stamp differs (%s vs %s)", service.Service, service.Values[0].Date, foundDate)
+		}
+		// check unit consistency
+		if foundUnit != service.Values[0].Cost.Unit {
+			return fmt.Errorf("service %s unit differs (%s vs %s)", service.Service, service.Values[0].Cost.Unit, foundUnit)
+		}
+		// add up value
+		total += service.Values[0].Cost.Value
+	}
 	// check totals of all services is same as total in meta
+	if math.Round(total*100)/100 != math.Round(response.Meta.Total.Cost.Value*100)/100 {
+		return fmt.Errorf("total cost differs from meta and total of services (%f vs %f)", response.Meta.Total.Cost.Value, total)
+	}
 	return nil
 }
 
@@ -234,6 +262,11 @@ func pullData(client *http.Client, accountID string, cookieMap map[string]string
 		log.Printf("[pulldata] error pulling data from service: %v ", err)
 		return nil, err
 	}
+	// check response
+	if resp.StatusCode != 200 {
+		log.Println("[pulldata] error pulling data from server")
+		return nil, fmt.Errorf("error fetching data from service, returned status %d", resp.StatusCode)
+	}
 	// read body
 	bodyBytes, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
@@ -252,7 +285,7 @@ func appendCSVHeader(csvData [][]string, group string) [][]string {
 }
 
 func appendCSVData(csvData [][]string, account string, data []string) [][]string {
-	log.Printf("[appendcsvdata] appended header for account %s\n", account)
+	log.Printf("[appendcsvdata] appended data for account %s\n", account)
 	return append(csvData, data)
 }
 
