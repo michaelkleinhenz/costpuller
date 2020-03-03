@@ -73,7 +73,6 @@ func main() {
 	}
 	// retrieve cookie
 	cookieStr := os.Args[1]
-	log.Printf("[main] using cookie %s\n", cookieStr)
 	cookieDeserialized := deserializeCurlCookie(cookieStr)
 	// get account lists
 	accounts, err := getAccountSets()
