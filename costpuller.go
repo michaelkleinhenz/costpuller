@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/csv"
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -101,7 +102,7 @@ func main() {
 			if err != nil {
 				log.Fatalf("[main] error parsing data from service: %v", err)
 			}
-			err = checkResponse(result)
+			err = checkResponse(parsed)
 			if err != nil {
 				log.Fatalf("[main] error checking plausability of response for account data %s: %v", account, err)
 			}
@@ -142,180 +143,62 @@ func parseResponse(response []byte) (*Response, error) {
 }
 
 func normalizeResponse(response *Response) ([]string, error) {
-	// format is: date, clusterId, accountId, PO, clusterType, usageType, product, infra, numberUsers, dataTransfer, machines, storage, keyMgmnt, registrar, dns, other, tax, refund
+	// format is: 
+	// date, clusterId, accountId, PO, clusterType, usageType, product, infra, numberUsers, dataTransfer, machines, storage, keyMgmnt, registrar, dns, other, tax, refund
 	// init fields with pending flag
 	output := make([]string, 18)
 	for idx := range(output) {
 		output[idx] = "PENDING"
 	}
+	// infra is always AWS
+	output[7] = "AWS"
+	// set date - we use the first service entry
+	output[0] = response.Data[0].Date
 	// set clusterID
-	output[1] = response.Meta.Filter.Account[0]
+	output[2] = response.Meta.Filter.Account[0]
+	// init cost values
+	output[9] = "0"
+	output[10] = "0"
+	output[11] = "0"
+	output[12] = "0"
+	output[13] = "0"
+	output[14] = "0"
+	output[15] = "0"
+	output[16] = "0"
+	output[17] = "0"	
+	// nomalize cost values
+	var otherVal float64 = 0
+	for _, service := range(response.Data[0].Services) {
+		switch service.Service {
+		case "AWSDataTransfer":
+			output[9] = fmt.Sprintf("%f", service.Values[0].Cost.Value)
+		case "AmazonEC2":
+			output[10] = fmt.Sprintf("%f", service.Values[0].Cost.Value)
+		case "AmazonS3":
+			output[11] = fmt.Sprintf("%f", service.Values[0].Cost.Value)
+		case "awskms":
+			output[12] = fmt.Sprintf("%f", service.Values[0].Cost.Value)
+		case "AmazonRoute53":
+			output[14] = fmt.Sprintf("%f", service.Values[0].Cost.Value)
+		default:
+			otherVal += service.Values[0].Cost.Value
+		}
+	}
+	// store other total
+	output[15] = fmt.Sprintf("%f", otherVal)
+	// return result
+	return output, nil
 }
 
 func checkResponse(response *Response) error {
 	// TODO do plausability checks
+	// check date consistency
+	// check that there is at least one service entry
+	// check t hat there is exactly one value section in services
+	// check that there is exactly one entry in toplevel data
+	// check totals of all services is same as total in meta
 	return nil
 }
-
-/*
-func parseResponse(response []byte) (map[string]string, error) {
-	var parsed interface{}
-	err := json.Unmarshal(response, &parsed)
-	if err != nil {
-		log.Printf("[parseresponse] error parsing json: %v\n", err)
-		return nil, err
-	}
-	result := make(map[string]string)
-	m := parsed.(map[string]interface{})
-	for key, value := range(m) {
-		switch key {
-		case "meta":
-			meta, ok := value.(map[string]interface{})
-			if !ok {
-				log.Println("[parseresponse] error casting meta section.")
-				return nil, err
-			}
-			result, err = parseMeta(meta, result)
-			if err != nil {
-				log.Printf("[parseresponse] error parsing meta section: %v\n", err)
-				return nil, err
-			}
-		case "data":
-			dataArr, ok := value.([]interface{})
-			if len(dataArr) != 1 {
-				log.Println("[parseresponse] data array is not exactly one element long.")
-				return nil, errors.New("data array is not exactly one element long")
-			}
-			dm, ok := dataArr[0].(map[string]interface{})
-			if !ok {
-				log.Println("[parseresponse] error casting data section.")
-				return nil, err
-			}		
-			if _, ok := result["date"]; ok {
-				// date is already set, do a consistency check
-				if result["date"] != dm["date"] {
-					log.Printf("[parseresponse] inconsistent date in json response: %s and %s\n", result["date"], dm["date"])
-					return nil, err			
-				}
-			} else {
-				// date not set yet, store it
-				result["date"], ok = dm["date"].(string)
-				if !ok {
-					log.Println("[parseresponse] error casting date value to string.")
-					return nil, err
-				}			
-			}
-			// parse services
-			sArr, ok := dm["services"].([]interface{})
-			if !ok {
-				log.Println("[parseresponse] error casting service array value to array.")
-				return nil, err
-			}
-			result, err = parseServices(sArr, result)
-			if err != nil {
-				log.Printf("[parseresponse] error parsing services section: %v\n", err)
-				return nil, err
-			}
-		}
-	}
-	return result, nil
-}
-
-func parseMeta(meta map[string]interface{}, data map[string]string) (map[string]string, error) {
-	if count, ok := meta["count"]; ok {
-		countVal, ok := count.(float64)
-		if !ok {
-			log.Println("[parsemeta] error casting count to float.")
-			return nil, errors.New("error casting count to float")
-		}
-		if countVal != 1 {
-			log.Println("[parsemeta] count is not exactly 1.")
-			return nil, errors.New("count is not exactly 1")
-		}
-	} else {
-		log.Println("[parsemeta] count not found in meta section.")
-		return nil, errors.New("count not found in meta section")
-	}
-	if filter, ok := meta["filter"]; ok {
-		filterTyped, ok := filter.(map[string]interface{})
-		if !ok {
-			log.Println("[parsemeta] error casting filter to map.")
-			return nil, errors.New("error casting filter to map")	
-		}
-
-	} else {
-		log.Println("[parsemeta] filter not found in meta section.")
-		return nil, errors.New("filter not found in meta section")
-	}
-	if total, ok := meta["total"]; ok {
-		totalTyped, ok := total.(map[string]interface{})
-		if !ok {
-			log.Println("[parsemeta] error casting total to map.")
-			return nil, errors.New("error casting total to map")	
-		}
-		
-	} else {
-		log.Println("[parsemeta] total not found in meta section.")
-		return nil, errors.New("total not found in meta section")
-	}
-	return data, nil
-}
-
-func parseServices(services []interface{}, data map[string]string) (map[string]string, error) {
-	for _, serviceRaw := range(services) {
-		serviceTyped, ok := serviceRaw.(map[string]interface{})
-		if !ok {
-			log.Println("[parseservices] error casting raw service to map.")
-			return nil, errors.New("error casting raw service to map")
-		}
-		var serviceName string
-		var serviceValue string
-		for key, value := range(serviceTyped) {
-			switch key {
-			case "service":
-				serviceName, ok = value.(string)
-				if !ok {
-					log.Println("[parseservices] error casting service name to string.")
-					return nil, errors.New("error casting service name to string")
-				}
-			case "values":
-				costWrapperEnv, ok := value.([]interface{})
-				if !ok {
-					log.Println("[parseservices] error casting values to array.")
-					return nil, errors.New("error casting values to array")
-				}
-				if len(costWrapperEnv) != 1 {
-					log.Println("[parseservices] values is not exactly one element long.")
-					return nil, errors.New("values is not exactly one element long")
-				}
-				costWrapper, ok := costWrapperEnv[0].(map[string]interface{})
-				if !ok {
-					log.Println("[parseservices] error casting values to map.")
-					return nil, errors.New("error casting values to map")
-				}
-				if _, ok := costWrapper["cost"]; ok {
-					cost, ok := costWrapper["cost"].(map[string]interface{})
-					if !ok {
-						log.Println("[parseservices] error casting cost to map.")
-						return nil, errors.New("error casting cost to map")
-					}
-					serviceValueFloat, ok := cost["value"].(float64)
-					serviceValue = fmt.Sprintf("%f", serviceValueFloat)
-					if !ok {
-						log.Printf("[parseservices] error casting cost value to string: %s\n", cost["value"])
-						return nil, errors.New("error casting cost value to string")
-					}
-				} else {
-					log.Printf("[parseservices] cost element not available for service %s\n", serviceName)
-					return nil, errors.New("cost element not available for service")
-				}
-			}
-		}
-		data[serviceName] = serviceValue
-	}
-	return data, nil
-}
-*/
 
 func pullData(client *http.Client, accountID string, cookieMap map[string]string) ([]byte, error) {
 	// create request
