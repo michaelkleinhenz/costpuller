@@ -4,6 +4,7 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v2"
 )
@@ -63,28 +65,48 @@ type ValueSection struct {
 	Cost CostSection `json:"cost"`
 }
 
+// AccountEntry describes an account with metadata
+type AccountEntry struct {
+	AccountID string `yaml:"accountid"`
+	Standardvalue float64	`yaml:"standardvalue"`
+	Deviationpercent int  `yaml:"deviationpercent"`
+}
+
 func main() {
 	log.Println("[main] costpuller starting..")
-	// create data holder
-	csvData := make([][]string, 0)
-	// check if cookie param is present
-	if len(os.Args) != 2 {
+	// parse flags
+	nowStr := time.Now().Format("20060102150405")
+	cookiePtr := flag.String("cookie", "", "access cookie for cost management system in curl serialized format")
+	csvfilePtr := flag.String("out", fmt.Sprintf("output-%s.csv", nowStr), "output file for csv data")
+	reportfilePtr := flag.String("report", fmt.Sprintf("report-%s.txt", nowStr), "output file for data consistency report")
+	flag.Parse()
+	log.Printf("[main] using csv output file %s\n", *csvfilePtr)
+	log.Printf("[main] using report output file %s\n", *reportfilePtr)
+	if *cookiePtr == "" {
 		log.Fatal("[main] no cookie parameter given!")
 	}
+	os.Exit(0)
+	// create data holder
+	csvData := make([][]string, 0)
 	// retrieve cookie
-	cookieStr := os.Args[1]
-	cookieDeserialized := deserializeCurlCookie(cookieStr)
+	cookieDeserialized := deserializeCurlCookie(*cookiePtr)
 	// get account lists
 	accounts, err := getAccountSets()
 	if err != nil {
 		log.Fatalf("[main] error unmarshalling accounts file: %v", err)
 	}
 	// open output file
-	outfile, err := os.Create("output.csv")
+	outfile, err := os.Create(*csvfilePtr)
 	if err != nil {
 		log.Fatalf("[main] error creating output file: %v", err)
 	}
 	defer outfile.Close()
+	// open report file
+	reportfile, err := os.Create(*reportfilePtr)
+	if err != nil {
+		log.Fatalf("[main] error creating report file: %v", err)
+	}
+	defer reportfile.Close()
 	client := &http.Client{}
 	// iterate over account lists
 	for group, accountList := range(accounts) {
@@ -93,9 +115,9 @@ func main() {
 			log.Fatalf("[main] error writing header to output file: %v", err)
 		}
 		for _, account := range(accountList) {
-			log.Printf("[main] pulling data for account %s (group %s)\n", account, group)			
+			log.Printf("[main] pulling data for account %s (group %s)\n", account.AccountID, group)			
 			// TODO
-			result, err := pullData(client, account, cookieDeserialized)
+			result, err := pullData(client, account.AccountID, cookieDeserialized)
 			if err != nil {
 				log.Fatalf("[main] error pulling data from service: %v", err)
 			}
@@ -103,16 +125,17 @@ func main() {
 			if err != nil {
 				log.Fatalf("[main] error parsing data from service: %v", err)
 			}
-			err = checkResponseConsistency(parsed)
+			err = checkResponseConsistency(account, parsed)
 			if err != nil {
-				log.Fatalf("[main] error checking consistency of response for account data %s: %v", account, err)
+				log.Printf("[main] error checking consistency of response for account data %s: %v", account.AccountID, err)
+				writeReport(reportfile, account.AccountID + ": " + err.Error())
 			}
-			log.Printf("[main] successful consistency check for data on account %s\n", account)
+			log.Printf("[main] successful consistency check for data on account %s\n", account.AccountID)
 			normalized, err := normalizeResponse(parsed)
 			if err != nil {
 				log.Fatalf("[main] error normalizing data from service: %v", err)
 			}
-			csvData = appendCSVData(csvData, account, normalized)
+			csvData = appendCSVData(csvData, account.AccountID, normalized)
 		}
 	}
 	// write data to csv
@@ -188,11 +211,13 @@ func normalizeResponse(response *Response) ([]string, error) {
 	}
 	// store other total
 	output[15] = fmt.Sprintf("%f", otherVal)
+	// TODO: make extra sure that listed costs total is equal to total in meta
 	// return result
 	return output, nil
 }
 
-func checkResponseConsistency(response *Response) error {
+func checkResponseConsistency(account AccountEntry, response *Response) error {
+	// TODO check base value consistence by comparing to a rough value given in the config
 	// check that there is exactly one entry in toplevel data
 	if len(response.Data) != 1 {
 		return fmt.Errorf("response data has length of %d instead of 1", len(response.Data))
@@ -223,6 +248,15 @@ func checkResponseConsistency(response *Response) error {
 	// check totals of all services is same as total in meta
 	if math.Round(total*100)/100 != math.Round(response.Meta.Total.Cost.Value*100)/100 {
 		return fmt.Errorf("total cost differs from meta and total of services (%f vs %f)", response.Meta.Total.Cost.Value, total)
+	}
+	// check account meta deviation if standardvalue is given
+	if account.Standardvalue > 0 {
+		diff := account.Standardvalue - total
+		diffAbs := math.Abs(diff)
+		diffPercent := (diffAbs / account.Standardvalue) * 100
+		if diffPercent > float64(account.Deviationpercent) {
+			return fmt.Errorf("deviation check failed: deviation is %f (%f%%), max deviation allowed is %d%% (value was %f, standard value %f)", diff, diffPercent, account.Deviationpercent, total, account.Standardvalue)
+		}	
 	}
 	return nil
 }
@@ -301,8 +335,17 @@ func writeCSV(outfile *os.File, data [][]string) error {
 	return nil
 }
 
-func getAccountSets() (map[string][]string, error) {
-	accounts := make(map[string][]string)
+func writeReport(outfile *os.File, data string) error {
+	_, err := outfile.WriteString("writes\n")
+	if err != nil {
+		log.Printf("[writereport] error writing report data to file: %v ", err)
+		return err
+	}
+	return nil
+}
+
+func getAccountSets() (map[string][]AccountEntry, error) {
+	accounts := make(map[string][]AccountEntry)
 	yamlFile, err := ioutil.ReadFile("accounts.yaml")
 	if err != nil {
 			log.Printf("[getaccountsets] error reading accounts file: %v ", err)
