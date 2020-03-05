@@ -6,8 +6,6 @@ Call the binary with `--help` for commandline options.
 
 Accounts are specified in the file `accounts.yaml`. Run the binary in the same directory of this file. The standard value and max deviation is checked against the total pulled from cost management. Reports are written to a seperate file and console. Deviation is not checked when standard value is given as 0.
 
-Call this with one single commandline parameter containing the cookie used for accessing the cost management in CURL format. Use your Chrome browser to copy the cookie in CURL format.
-
 ## Authorizing the Client
 
 For this to work, the client needs an authorization for the cost management system. It is gathered from a valid cookie for cost management. You can provide the cookie in CURL format (eg. copied from a browser instance where you already logged in) using the `--cookie=<cookie>` parameter or by accessing the Chrome cookie database directly (`--readcookie`). The latter only works on Chrome browsers that don't encrypt the cookie database (eg. Linux). You can give the path to the cookie database file using `--cookiedb=<path>`, otherwise the default Linux/Chrome path is used.
