@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -11,9 +12,15 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"os/user"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/costexplorer"
+	"github.com/jinzhu/now"
+	"github.com/zellyn/kooky"
 	"gopkg.in/yaml.v2"
 )
 
@@ -75,21 +82,73 @@ type AccountEntry struct {
 func main() {
 	log.Println("[main] costpuller starting..")
 	// parse flags
+	usr, _ := user.Current()
 	nowStr := time.Now().Format("20060102150405")
 	cookiePtr := flag.String("cookie", "", "access cookie for cost management system in curl serialized format")
+	readcookiePtr := flag.Bool("readcookie", false, "reads the cookie from the Chrome cookies database")
+	cookieDbPtr := flag.String("cookiedb", fmt.Sprintf("%s/.config/google-chrome/Default/Cookies", usr.HomeDir), "path to Chrome cookies database file")
 	csvfilePtr := flag.String("out", fmt.Sprintf("output-%s.csv", nowStr), "output file for csv data")
 	reportfilePtr := flag.String("report", fmt.Sprintf("report-%s.txt", nowStr), "output file for data consistency report")
+	checkConsistencyPtr := flag.Bool("consistency", false, "check incremental AWS/Cost Management consistency")
+	consistencyMonthPtr := flag.String("month", "", "consistency check context month in format yyyy-mm")
+	consistencyAccountIDPtr := flag.String("accountid", "", "consistency check context AWS account id")
 	flag.Parse()
+	// retrieve cookie
+	var err error
+	var cookieDeserialized map[string]string
+	if *cookiePtr != "" {
+		// cookie is given on the cli in CURL format
+		log.Println("[main] retrieving cookies from cli")
+		cookieDeserialized, err = deserializeCurlCookie(*cookiePtr)
+	} else if *readcookiePtr {
+		// cookie is to be read from Chrome's cookie database
+		log.Println("[main] retrieving cookies from Chrome database")
+		// wait for user to login
+		fmt.Print("ACTION REQUIRED: please login to https://cloud.redhat.com/beta/cost-management/aws using your Chrome browser. Hit Enter when done.")
+		scanner := bufio.NewScanner(os.Stdin)
+		scanner.Scan()
+		fmt.Println("Thanks! Now retrieving cookies from Chrome..")
+		cookiesCRH, err := kooky.ReadChromeCookies(*cookieDbPtr, "cloud.redhat.com", "", time.Time{})
+		if err != nil {
+			log.Fatalf("[main] error reading cookies from Chrome database: %v", err)
+		}	
+		cookiesRH, err := kooky.ReadChromeCookies(*cookieDbPtr, ".redhat.com", "", time.Time{})
+		if err != nil {
+			log.Fatalf("[main] error reading cookies from Chrome database: %v", err)
+		}	
+		cookiesCRH = append(cookiesCRH, cookiesRH...)
+		cookieDeserialized, err = deserializeChromeCookie(cookiesCRH)
+	} else {
+		log.Fatal("[main] either --readcookie or --cookie=<cookie> needs to be given!")
+	}
+	if err != nil {
+		log.Fatalf("[main] error deserializing cookie: %v", err)
+	}
+	// create http client
+	client := &http.Client{}
+	// branch out if we want to do the consistency check
+	if *checkConsistencyPtr {
+		if *consistencyMonthPtr == "" {
+			log.Fatal("[main] consistency check requested, but no month given (use --month=yyyy-mm)")
+		}
+		if *consistencyAccountIDPtr == "" {
+			log.Fatal("[main] consistency check requested, but no accountid given (use --accountid=yyyy-mm)")
+		}
+		isConsistent, err := checkAWSConsistency(client, cookieDeserialized, *consistencyAccountIDPtr, *consistencyMonthPtr)
+		if err != nil {
+			log.Fatalf("[main] error checking cost consistency: %v", err)
+		}
+		if isConsistent {
+			log.Println("[main] cost is consistent")
+			os.Exit(0)
+		}
+		log.Println("[main] cost is not consistent")
+		os.Exit(-1)
+	}
 	log.Printf("[main] using csv output file %s\n", *csvfilePtr)
 	log.Printf("[main] using report output file %s\n", *reportfilePtr)
-	if *cookiePtr == "" {
-		log.Fatal("[main] no cookie parameter given!")
-	}
-	os.Exit(0)
 	// create data holder
 	csvData := make([][]string, 0)
-	// retrieve cookie
-	cookieDeserialized := deserializeCurlCookie(*cookiePtr)
 	// get account lists
 	accounts, err := getAccountSets()
 	if err != nil {
@@ -107,7 +166,6 @@ func main() {
 		log.Fatalf("[main] error creating report file: %v", err)
 	}
 	defer reportfile.Close()
-	client := &http.Client{}
 	// iterate over account lists
 	for group, accountList := range(accounts) {
 		csvData = appendCSVHeader(csvData, group)
@@ -116,7 +174,6 @@ func main() {
 		}
 		for _, account := range(accountList) {
 			log.Printf("[main] pulling data for account %s (group %s)\n", account.AccountID, group)			
-			// TODO
 			result, err := pullData(client, account.AccountID, cookieDeserialized)
 			if err != nil {
 				log.Fatalf("[main] error pulling data from service: %v", err)
@@ -129,8 +186,9 @@ func main() {
 			if err != nil {
 				log.Printf("[main] error checking consistency of response for account data %s: %v", account.AccountID, err)
 				writeReport(reportfile, account.AccountID + ": " + err.Error())
+			} else {
+				log.Printf("[main] successful consistency check for data on account %s\n", account.AccountID)
 			}
-			log.Printf("[main] successful consistency check for data on account %s\n", account.AccountID)
 			normalized, err := normalizeResponse(parsed)
 			if err != nil {
 				log.Fatalf("[main] error normalizing data from service: %v", err)
@@ -147,14 +205,80 @@ func main() {
 	log.Println("[main] operation done")
 }
 
-func deserializeCurlCookie(curlCookie string) map[string]string {
+func checkAWSConsistency(client *http.Client, cookieMap map[string]string, accountID string, month string) (bool, error) {
+	log.Println("[checkawsconsistency] note: using credentials and account from env AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY")
+	// check month format
+	// TODO we can only check this month and last month calculated from today!
+	focusMonth, err := time.Parse("2006-01", month)
+	if err != nil {
+		log.Printf("[checkawsconsistency] month format error: %v\n", err)
+		return false, err
+	}
+	beginningOfMonth := now.With(focusMonth).BeginningOfMonth()
+	endOfMonth := now.With(focusMonth).EndOfMonth().Add(time.Hour * 24)
+	dayStart := beginningOfMonth.Format("2006-01-02")
+	dayEnd := endOfMonth.Format("2006-01-02")
+	log.Printf("[checkawsconsistency] using date range %s to %s", dayStart, dayEnd)
+	// retrieve AWS cost
+	session := session.Must(session.NewSessionWithOptions(session.Options{
+    SharedConfigState: session.SharedConfigEnable,
+	}))
+	svc := costexplorer.New(session)
+	granularity := "MONTHLY"
+	metricsBlendedCost := "BlendedCost" // we only want to look at the blended cost
+	costAndUsage, err := svc.GetCostAndUsage(&costexplorer.GetCostAndUsageInput{
+		TimePeriod: &costexplorer.DateInterval{
+			Start: &dayStart,
+			End: &dayEnd,
+		},
+		Granularity: &granularity,
+		Metrics: []*string{&metricsBlendedCost},
+	})
+	if err != nil {
+		log.Printf("[checkawsconsistency] error retrieving aws cost report: %v\n", err)
+		return false, err
+	}
+	amountAWS := *(*(*costAndUsage.ResultsByTime[0]).Total[metricsBlendedCost]).Amount
+	unitAWS := *(*(*costAndUsage.ResultsByTime[0]).Total[metricsBlendedCost]).Unit
+	amountAWSFloat, err := strconv.ParseFloat(amountAWS, 64)
+	log.Printf("[checkawsconsistency] retrieved AWS blended cost is %s %f", unitAWS, amountAWSFloat)
+	// retrieve Cost Management Cost
+	result, err := pullData(client, accountID, cookieMap)
+	if err != nil {
+		log.Fatalf("[main] error pulling data from service: %v", err)
+	}
+	costManagementResponse, err := parseResponse(result)
+	if err != nil {
+		log.Fatalf("[main] error parsing data from service: %v", err)
+	}
+	costManagementAmount := costManagementResponse.Meta.Total.Cost.Value
+	costManagementUnit := costManagementResponse.Meta.Total.Cost.Unit
+	if costManagementAmount != amountAWSFloat || costManagementUnit != unitAWS {
+		log.Printf("[main] cost not consistent: AWS reports %s %f, Cost Management reports %s %f", unitAWS, amountAWSFloat, costManagementUnit, costManagementAmount)
+		return false, fmt.Errorf("cost not consistent: AWS reports %s %f, Cost Management reports %s %f", unitAWS, amountAWSFloat, costManagementUnit, costManagementAmount)
+	}
+	return true, nil
+}
+
+func deserializeCurlCookie(curlCookie string) (map[string]string, error) {
 	deserialized := make(map[string]string)
 	cookieElements := strings.Split(curlCookie, "; ")
 	for _, cookieStr := range(cookieElements) {
 		keyValue := strings.Split(cookieStr, "=")
+		if len(keyValue) < 2 {
+			return nil, errors.New("[deserializecurlcookie] cookie not in correct format")
+		}
 		deserialized[keyValue[0]] = keyValue[1]
 	}
-	return deserialized
+	return deserialized, nil
+}
+
+func deserializeChromeCookie(chromeCookies []*kooky.Cookie) (map[string]string, error) {
+	deserialized := make(map[string]string)
+	for _, cookie := range chromeCookies {
+		deserialized[cookie.Name] = cookie.Value
+	}
+	return deserialized, nil
 }
 
 func parseResponse(response []byte) (*Response, error) {
@@ -298,7 +422,9 @@ func pullData(client *http.Client, accountID string, cookieMap map[string]string
 	// check response
 	if resp.StatusCode != 200 {
 		log.Println("[pulldata] error pulling data from server")
-		return nil, fmt.Errorf("error fetching data from service, returned status %d", resp.StatusCode)
+		bodyBytes, _ := ioutil.ReadAll(resp.Body)
+		bodyStr := string(bodyBytes)
+		return nil, fmt.Errorf("error fetching data from service, returned status %d, url was %s\nBody: %s", resp.StatusCode, req.URL.String(), bodyStr)
 	}
 	// read body
 	bodyBytes, err := ioutil.ReadAll(resp.Body)
@@ -336,7 +462,7 @@ func writeCSV(outfile *os.File, data [][]string) error {
 }
 
 func writeReport(outfile *os.File, data string) error {
-	_, err := outfile.WriteString("writes\n")
+	_, err := outfile.WriteString(data + "\n")
 	if err != nil {
 		log.Printf("[writereport] error writing report data to file: %v ", err)
 		return err

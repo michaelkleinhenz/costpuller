@@ -2,3 +2,6 @@ accounts.yaml
 .vscode
 output.csv
 __debug_bin
+costpuller
+output-*
+report-*
