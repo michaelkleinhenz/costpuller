@@ -379,7 +379,7 @@ func checkResponseConsistency(account AccountEntry, response *Response) error {
 		diffAbs := math.Abs(diff)
 		diffPercent := (diffAbs / account.Standardvalue) * 100
 		if diffPercent > float64(account.Deviationpercent) {
-			return fmt.Errorf("deviation check failed: deviation is %f (%f%%), max deviation allowed is %d%% (value was %f, standard value %f)", diff, diffPercent, account.Deviationpercent, total, account.Standardvalue)
+			return fmt.Errorf("deviation check failed: deviation is %.2f (%.2f%%), max deviation allowed is %d%% (value was %.2f, standard value %.2f)", diffAbs, diffPercent, account.Deviationpercent, total, account.Standardvalue)
 		}	
 	}
 	return nil
