@@ -84,17 +84,84 @@ func main() {
 	// parse flags
 	usr, _ := user.Current()
 	nowStr := time.Now().Format("20060102150405")
+	awsPtr := flag.Bool("aws", false, "pull data from AWS")
+	monthPtr := flag.String("month", "", "context month in format yyyy-mm (only for aws mode)")
 	cookiePtr := flag.String("cookie", "", "access cookie for cost management system in curl serialized format")
 	readcookiePtr := flag.Bool("readcookie", false, "reads the cookie from the Chrome cookies database")
 	cookieDbPtr := flag.String("cookiedb", fmt.Sprintf("%s/.config/google-chrome/Default/Cookies", usr.HomeDir), "path to Chrome cookies database file")
 	csvfilePtr := flag.String("out", fmt.Sprintf("output-%s.csv", nowStr), "output file for csv data")
 	reportfilePtr := flag.String("report", fmt.Sprintf("report-%s.txt", nowStr), "output file for data consistency report")
-	checkConsistencyPtr := flag.Bool("consistency", false, "check incremental AWS/Cost Management consistency")
-	consistencyMonthPtr := flag.String("month", "", "consistency check context month in format yyyy-mm")
-	consistencyAccountIDPtr := flag.String("accountid", "", "consistency check context AWS account id")
+	//checkConsistencyPtr := flag.Bool("consistency", false, "check incremental AWS/Cost Management consistency")
+	//consistencyMonthPtr := flag.String("month", "", "consistency check context month in format yyyy-mm")
+	//consistencyAccountIDPtr := flag.String("accountid", "", "consistency check context AWS account id")
 	flag.Parse()
-	// retrieve cookie
+	// open output files
 	var err error
+	log.Printf("[main] using csv output file %s\n", *csvfilePtr)
+	log.Printf("[main] using report output file %s\n", *reportfilePtr)
+	// create data holder
+	csvData := make([][]string, 0)
+	// get account lists
+	accounts, err := getAccountSets()
+	if err != nil {
+		log.Fatalf("[main] error unmarshalling accounts file: %v", err)
+	}
+	// open output file
+	outfile, err := os.Create(*csvfilePtr)
+	if err != nil {
+		log.Fatalf("[main] error creating output file: %v", err)
+	}
+	defer outfile.Close()
+	// open report file
+	reportfile, err := os.Create(*reportfilePtr)
+	if err != nil {
+		log.Fatalf("[main] error creating report file: %v", err)
+	}
+	defer reportfile.Close()
+	// check if we should run in AWS mode
+	if *awsPtr {
+		log.Println("[main] note: using credentials and account from env AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY for aws pull")
+		if *monthPtr == "" {
+			log.Fatal("[main] aws mode requested, but no month given (use --month=yyyy-mm)")
+		}
+		accounts, err := getAccountSets()
+		if err != nil {
+			log.Fatalf("[main] error unmarshalling accounts file: %v", err)
+		}
+		for group, accountList := range(accounts) {
+			csvData = appendCSVHeader(csvData, group)
+			for _, account := range(accountList) {
+				log.Printf("[main] pulling data for account %s (group %s)\n", account.AccountID, group)			
+				result, err := pullAWSData(account.AccountID, *monthPtr)
+				if err != nil {
+					log.Fatalf("[main] error pulling data from AWS for account %s: %v", account.AccountID, err)
+				}	
+
+				err = checkResponseConsistencyAWS(account, result)
+				if err != nil {
+					log.Printf("[main] error checking consistency of response for account data %s: %v", account.AccountID, err)
+					writeReport(reportfile, account.AccountID + ": " + err.Error())
+				} else {
+					log.Printf("[main] successful consistency check for data on account %s\n", account.AccountID)
+				}
+
+				normalized, err := normalizeResponseAWS(*monthPtr, account.AccountID, result)
+				if err != nil {
+					log.Fatalf("[main] error normalizing data from AWS for account %s: %v", account.AccountID, err)
+				}	
+				csvData = appendCSVData(csvData, account.AccountID, normalized)	
+			}
+		}
+		// write data to csv
+		err = writeCSV(outfile, csvData)
+		if err != nil {
+			log.Fatalf("[main] error writing to output file: %v", err)
+		}
+		// done
+		log.Println("[main] operation done")
+		return
+	}
+	// not running in aws mode, retrieve cookie
 	var cookieDeserialized map[string]string
 	if *cookiePtr != "" {
 		// cookie is given on the cli in CURL format
@@ -126,46 +193,6 @@ func main() {
 	}
 	// create http client
 	client := &http.Client{}
-	// branch out if we want to do the consistency check
-	if *checkConsistencyPtr {
-		if *consistencyMonthPtr == "" {
-			log.Fatal("[main] consistency check requested, but no month given (use --month=yyyy-mm)")
-		}
-		if *consistencyAccountIDPtr == "" {
-			log.Fatal("[main] consistency check requested, but no accountid given (use --accountid=yyyy-mm)")
-		}
-		isConsistent, err := checkAWSConsistency(client, cookieDeserialized, *consistencyAccountIDPtr, *consistencyMonthPtr)
-		if err != nil {
-			log.Fatalf("[main] error checking cost consistency: %v", err)
-		}
-		if isConsistent {
-			log.Println("[main] cost is consistent")
-			os.Exit(0)
-		}
-		log.Println("[main] cost is not consistent")
-		os.Exit(-1)
-	}
-	log.Printf("[main] using csv output file %s\n", *csvfilePtr)
-	log.Printf("[main] using report output file %s\n", *reportfilePtr)
-	// create data holder
-	csvData := make([][]string, 0)
-	// get account lists
-	accounts, err := getAccountSets()
-	if err != nil {
-		log.Fatalf("[main] error unmarshalling accounts file: %v", err)
-	}
-	// open output file
-	outfile, err := os.Create(*csvfilePtr)
-	if err != nil {
-		log.Fatalf("[main] error creating output file: %v", err)
-	}
-	defer outfile.Close()
-	// open report file
-	reportfile, err := os.Create(*reportfilePtr)
-	if err != nil {
-		log.Fatalf("[main] error creating report file: %v", err)
-	}
-	defer reportfile.Close()
 	// iterate over account lists
 	for group, accountList := range(accounts) {
 		csvData = appendCSVHeader(csvData, group)
@@ -182,14 +209,14 @@ func main() {
 			if err != nil {
 				log.Fatalf("[main] error parsing data from service: %v", err)
 			}
-			err = checkResponseConsistency(account, parsed)
+			err = checkResponseConsistencyCM(account, parsed)
 			if err != nil {
 				log.Printf("[main] error checking consistency of response for account data %s: %v", account.AccountID, err)
 				writeReport(reportfile, account.AccountID + ": " + err.Error())
 			} else {
 				log.Printf("[main] successful consistency check for data on account %s\n", account.AccountID)
 			}
-			normalized, err := normalizeResponse(parsed)
+			normalized, err := normalizeResponseCostManagement(parsed)
 			if err != nil {
 				log.Fatalf("[main] error normalizing data from service: %v", err)
 			}
@@ -205,20 +232,18 @@ func main() {
 	log.Println("[main] operation done")
 }
 
-func checkAWSConsistency(client *http.Client, cookieMap map[string]string, accountID string, month string) (bool, error) {
-	log.Println("[checkawsconsistency] note: using credentials and account from env AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY")
+func pullAWSData(accountID string, month string) (map[string]float64, error) {
 	// check month format
-	// TODO we can only check this month and last month calculated from today!
 	focusMonth, err := time.Parse("2006-01", month)
 	if err != nil {
-		log.Printf("[checkawsconsistency] month format error: %v\n", err)
-		return false, err
+		log.Printf("[pullawsdata] month format error: %v\n", err)
+		return nil, err
 	}
 	beginningOfMonth := now.With(focusMonth).BeginningOfMonth()
 	endOfMonth := now.With(focusMonth).EndOfMonth().Add(time.Hour * 24)
 	dayStart := beginningOfMonth.Format("2006-01-02")
 	dayEnd := endOfMonth.Format("2006-01-02")
-	log.Printf("[checkawsconsistency] using date range %s to %s", dayStart, dayEnd)
+	log.Printf("[pullawsdata] using date range %s to %s", dayStart, dayEnd)
 	// retrieve AWS cost
 	session := session.Must(session.NewSessionWithOptions(session.Options{
     SharedConfigState: session.SharedConfigEnable,
@@ -226,38 +251,98 @@ func checkAWSConsistency(client *http.Client, cookieMap map[string]string, accou
 	svc := costexplorer.New(session)
 	granularity := "MONTHLY"
 	metricsBlendedCost := "BlendedCost" // we only want to look at the blended cost
-	costAndUsage, err := svc.GetCostAndUsage(&costexplorer.GetCostAndUsageInput{
+	dimensionLinkedAccountKey := "LINKED_ACCOUNT"
+	dimensionLinkedAccountValue := accountID
+	groupByDimension := "DIMENSION"
+	groupByServce := "SERVICE"
+	costAndUsageService, err := svc.GetCostAndUsage(&costexplorer.GetCostAndUsageInput{
 		TimePeriod: &costexplorer.DateInterval{
 			Start: &dayStart,
 			End: &dayEnd,
 		},
 		Granularity: &granularity,
 		Metrics: []*string{&metricsBlendedCost},
+		Filter: &costexplorer.Expression{
+			Dimensions: &costexplorer.DimensionValues{
+				Key: &dimensionLinkedAccountKey,
+				Values: []*string{&dimensionLinkedAccountValue},
+			},
+		},
+		GroupBy: []*costexplorer.GroupDefinition{
+			&costexplorer.GroupDefinition{
+				Type: &groupByDimension,
+				Key: &groupByServce,
+			},
+		},
 	})
 	if err != nil {
-		log.Printf("[checkawsconsistency] error retrieving aws cost report: %v\n", err)
-		return false, err
+		log.Printf("[pullawsdata] error retrieving aws service cost report: %v\n", err)
+		return nil, err
 	}
-	amountAWS := *(*(*costAndUsage.ResultsByTime[0]).Total[metricsBlendedCost]).Amount
-	unitAWS := *(*(*costAndUsage.ResultsByTime[0]).Total[metricsBlendedCost]).Unit
-	amountAWSFloat, err := strconv.ParseFloat(amountAWS, 64)
-	log.Printf("[checkawsconsistency] retrieved AWS blended cost is %s %f", unitAWS, amountAWSFloat)
-	// retrieve Cost Management Cost
-	result, err := pullData(client, accountID, cookieMap)
+	costAndUsageTotal, err := svc.GetCostAndUsage(&costexplorer.GetCostAndUsageInput{
+		TimePeriod: &costexplorer.DateInterval{
+			Start: &dayStart,
+			End: &dayEnd,
+		},
+		Granularity: &granularity,
+		Metrics: []*string{&metricsBlendedCost},
+		Filter: &costexplorer.Expression{
+			Dimensions: &costexplorer.DimensionValues{
+				Key: &dimensionLinkedAccountKey,
+				Values: []*string{&dimensionLinkedAccountValue},
+			},
+		},
+	})
 	if err != nil {
-		log.Fatalf("[main] error pulling data from service: %v", err)
+		log.Printf("[pullawsdata] error retrieving aws total cost report: %v\n", err)
+		return nil, err
 	}
-	costManagementResponse, err := parseResponse(result)
+	// decode total value
+	totalAWSStr := *(*(*costAndUsageTotal.ResultsByTime[0]).Total[metricsBlendedCost]).Amount
+	totalAWS, err := strconv.ParseFloat(totalAWSStr, 64)
 	if err != nil {
-		log.Fatalf("[main] error parsing data from service: %v", err)
+		log.Printf("[pullawsdata] error converting aws total value: %v", err)
+		return nil, err
 	}
-	costManagementAmount := costManagementResponse.Meta.Total.Cost.Value
-	costManagementUnit := costManagementResponse.Meta.Total.Cost.Unit
-	if costManagementAmount != amountAWSFloat || costManagementUnit != unitAWS {
-		log.Printf("[main] cost not consistent: AWS reports %s %f, Cost Management reports %s %f", unitAWS, amountAWSFloat, costManagementUnit, costManagementAmount)
-		return false, fmt.Errorf("cost not consistent: AWS reports %s %f, Cost Management reports %s %f", unitAWS, amountAWSFloat, costManagementUnit, costManagementAmount)
+	unitAWS := *(*(*costAndUsageTotal.ResultsByTime[0]).Total[metricsBlendedCost]).Unit
+	if unitAWS != "USD" {
+		log.Printf("[pullawsdata] pulled unit is not USD: %s", unitAWS)
+		return nil, fmt.Errorf("pulled unit is not USD: %s", unitAWS)
 	}
-	return true, nil
+	// decode service data
+	var totalService float64 = 0
+	serviceResults := make(map[string]float64)
+	resultsByTime := costAndUsageService.ResultsByTime
+	if len(resultsByTime) != 1 {
+		log.Printf("[pullawsdata] warning account %s does not have exactly one service results by time (has %d)", accountID, len(resultsByTime))
+		return serviceResults, nil
+	}
+	serviceGroups := resultsByTime[0].Groups
+	for _, group := range(serviceGroups) {
+		if len(group.Keys) != 1 {
+			log.Printf("[pullawsdata] warning account %s service group does not have exactly one key", accountID)
+			return serviceResults, fmt.Errorf("[pullawsdata] warning account %s service group does not have exactly one key", accountID)
+		}
+		key := group.Keys[0]
+		valueStr := group.Metrics["BlendedCost"].Amount
+		unit := group.Metrics["BlendedCost"].Unit
+		if *unit != unitAWS {
+			log.Printf("[pullawsdata] error: inconsistent units (%s vs %s) for account %s", unitAWS, *unit, accountID)
+			return nil, fmt.Errorf("[pullawsdata] error: inconsistent units (%s vs %s) for account %s", unitAWS, *unit, accountID)
+		}
+		value, err := strconv.ParseFloat(*valueStr, 64)
+		if err != nil {
+			log.Printf("[pullawsdata] error converting aws service value: %v", err)
+			return nil, err
+		}
+		serviceResults[*key] = value
+		totalService += value
+	}
+	if math.Round(totalService*100)/100 != math.Round(totalAWS*100)/100  {
+		log.Printf("[pullawsdata] error: account %s service total %f does not match aws total %f", accountID, totalService, totalAWS)
+		return nil, fmt.Errorf("[pullawsdata] error: account %s service total %f does not match aws total %f", accountID, totalService, totalAWS)
+	}
+	return serviceResults, nil
 }
 
 func deserializeCurlCookie(curlCookie string) (map[string]string, error) {
@@ -291,7 +376,64 @@ func parseResponse(response []byte) (*Response, error) {
 	return responseData, nil
 }
 
-func normalizeResponse(response *Response) ([]string, error) {
+func normalizeResponseAWS(daterange string, accountID string, serviceResults map[string]float64) ([]string, error) {
+	// format is: 
+	// date, clusterId, accountId, PO, clusterType, usageType, product, infra, numberUsers, dataTransfer, machines, storage, keyMgmnt, registrar, dns, other, tax, refund
+	output := make([]string, 18)
+	for idx := range(output) {
+		output[idx] = "PENDING"
+	}
+	// infra is always AWS
+	output[7] = "AWS"
+	// set date - we use the first service entry
+	output[0] = daterange
+	// set clusterID
+	output[2] = accountID
+	// init cost values
+	output[9] = "0"
+	output[10] = "0"
+	output[11] = "0"
+	output[12] = "0"
+	output[13] = "0"
+	output[14] = "0"
+	output[15] = "0"
+	output[17] = "0"	
+	// nomalize cost values
+	var ec2Val float64 = 0
+	var kmVal float64 = 0
+	var otherVal float64 = 0
+	for key, value := range(serviceResults) {
+		switch key {
+		case "AWS Data Transfer":
+			output[9] = fmt.Sprintf("%f", value)
+		case "Amazon Elastic Compute Cloud - Compute":
+			ec2Val += value
+		case "EC2 - Other":
+			ec2Val += value
+		case "Amazon Simple Storage Service":
+			output[11] = fmt.Sprintf("%f", value)
+		case "AWS Key Management Service":
+			kmVal += value
+		case "AWS Secrets Manager":
+			kmVal += value
+		case "Amazon Route 53":
+			output[14] = fmt.Sprintf("%f", value)
+		case "Tax":
+			output[16] = fmt.Sprintf("%f", value)
+		default:
+			otherVal += value
+		}
+	}
+	// EC2
+	output[10] = fmt.Sprintf("%f", ec2Val)
+	// key management
+	output[12] = fmt.Sprintf("%f", kmVal)
+	// store other total
+	output[15] = fmt.Sprintf("%f", otherVal)
+	return output, nil
+}
+
+func normalizeResponseCostManagement(response *Response) ([]string, error) {
 	// format is: 
 	// date, clusterId, accountId, PO, clusterType, usageType, product, infra, numberUsers, dataTransfer, machines, storage, keyMgmnt, registrar, dns, other, tax, refund
 	// init fields with pending flag
@@ -340,7 +482,7 @@ func normalizeResponse(response *Response) ([]string, error) {
 	return output, nil
 }
 
-func checkResponseConsistency(account AccountEntry, response *Response) error {
+func checkResponseConsistencyCM(account AccountEntry, response *Response) error {
 	// TODO check base value consistence by comparing to a rough value given in the config
 	// check that there is exactly one entry in toplevel data
 	if len(response.Data) != 1 {
@@ -372,6 +514,24 @@ func checkResponseConsistency(account AccountEntry, response *Response) error {
 	// check totals of all services is same as total in meta
 	if math.Round(total*100)/100 != math.Round(response.Meta.Total.Cost.Value*100)/100 {
 		return fmt.Errorf("total cost differs from meta and total of services (%f vs %f)", response.Meta.Total.Cost.Value, total)
+	}
+	// check account meta deviation if standardvalue is given
+	if account.Standardvalue > 0 {
+		diff := account.Standardvalue - total
+		diffAbs := math.Abs(diff)
+		diffPercent := (diffAbs / account.Standardvalue) * 100
+		if diffPercent > float64(account.Deviationpercent) {
+			return fmt.Errorf("deviation check failed: deviation is %.2f (%.2f%%), max deviation allowed is %d%% (value was %.2f, standard value %.2f)", diffAbs, diffPercent, account.Deviationpercent, total, account.Standardvalue)
+		}	
+	}
+	return nil
+}
+
+func checkResponseConsistencyAWS(account AccountEntry, results map[string]float64) error {
+	var total float64 = 0
+	for _, value := range(results) {
+		// add up value
+		total += value
 	}
 	// check account meta deviation if standardvalue is given
 	if account.Standardvalue > 0 {
