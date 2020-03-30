@@ -86,6 +86,7 @@ func main() {
 	nowStr := time.Now().Format("20060102150405")
 	awsPtr := flag.Bool("aws", false, "pull data from AWS")
 	monthPtr := flag.String("month", "", "context month in format yyyy-mm (only for aws mode)")
+	costTypePtr := flag.String("costtype", "BlendedCost", "cost type to pull (only for aws mode, one of AmortizedCost, BlendedCost, NetAmortizedCost, NetUnblendedCost, NormalizedUsageAmount, UnblendedCost, and UsageQuantity)")
 	cookiePtr := flag.String("cookie", "", "access cookie for cost management system in curl serialized format")
 	readcookiePtr := flag.Bool("readcookie", false, "reads the cookie from the Chrome cookies database")
 	cookieDbPtr := flag.String("cookiedb", fmt.Sprintf("%s/.config/google-chrome/Default/Cookies", usr.HomeDir), "path to Chrome cookies database file")
@@ -132,7 +133,7 @@ func main() {
 			csvData = appendCSVHeader(csvData, group)
 			for _, account := range(accountList) {
 				log.Printf("[main] pulling data for account %s (group %s)\n", account.AccountID, group)			
-				result, err := pullAWSData(account.AccountID, *monthPtr)
+				result, err := pullAWSData(account.AccountID, *monthPtr, *costTypePtr)
 				if err != nil {
 					log.Fatalf("[main] error pulling data from AWS for account %s: %v", account.AccountID, err)
 				}	
@@ -232,7 +233,7 @@ func main() {
 	log.Println("[main] operation done")
 }
 
-func pullAWSData(accountID string, month string) (map[string]float64, error) {
+func pullAWSData(accountID string, month string, costType string) (map[string]float64, error) {
 	// check month format
 	focusMonth, err := time.Parse("2006-01", month)
 	if err != nil {
@@ -250,7 +251,7 @@ func pullAWSData(accountID string, month string) (map[string]float64, error) {
 	}))
 	svc := costexplorer.New(session)
 	granularity := "MONTHLY"
-	metricsBlendedCost := "BlendedCost" // we only want to look at the blended cost
+	metricsBlendedCost := costType
 	dimensionLinkedAccountKey := "LINKED_ACCOUNT"
 	dimensionLinkedAccountValue := accountID
 	groupByDimension := "DIMENSION"
@@ -324,8 +325,8 @@ func pullAWSData(accountID string, month string) (map[string]float64, error) {
 			return serviceResults, fmt.Errorf("[pullawsdata] warning account %s service group does not have exactly one key", accountID)
 		}
 		key := group.Keys[0]
-		valueStr := group.Metrics["BlendedCost"].Amount
-		unit := group.Metrics["BlendedCost"].Unit
+		valueStr := group.Metrics[costType].Amount
+		unit := group.Metrics[costType].Unit
 		if *unit != unitAWS {
 			log.Printf("[pullawsdata] error: inconsistent units (%s vs %s) for account %s", unitAWS, *unit, accountID)
 			return nil, fmt.Errorf("[pullawsdata] error: inconsistent units (%s vs %s) for account %s", unitAWS, *unit, accountID)
@@ -456,7 +457,7 @@ func normalizeResponseCostManagement(response *Response) ([]string, error) {
 	output[14] = "0"
 	output[15] = "0"
 	output[16] = "0"
-	output[17] = "0"	
+	output[17] = "0"
 	// nomalize cost values
 	var otherVal float64 = 0
 	for _, service := range(response.Data[0].Services) {
