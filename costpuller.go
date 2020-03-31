@@ -85,16 +85,14 @@ func main() {
 	usr, _ := user.Current()
 	nowStr := time.Now().Format("20060102150405")
 	awsPtr := flag.Bool("aws", false, "pull data from AWS")
-	monthPtr := flag.String("month", "", "context month in format yyyy-mm (only for aws mode)")
-	costTypePtr := flag.String("costtype", "BlendedCost", "cost type to pull (only for aws mode, one of AmortizedCost, BlendedCost, NetAmortizedCost, NetUnblendedCost, NormalizedUsageAmount, UnblendedCost, and UsageQuantity)")
+	monthPtr := flag.String("month", "", "context month in format yyyy-mm (only for aws and check modes)")
+	costTypePtr := flag.String("costtype", "BlendedCost", "cost type to pull (only for aws and check modes, one of AmortizedCost, BlendedCost, NetAmortizedCost, NetUnblendedCost, NormalizedUsageAmount, UnblendedCost, and UsageQuantity)")
 	cookiePtr := flag.String("cookie", "", "access cookie for cost management system in curl serialized format")
 	readcookiePtr := flag.Bool("readcookie", false, "reads the cookie from the Chrome cookies database")
 	cookieDbPtr := flag.String("cookiedb", fmt.Sprintf("%s/.config/google-chrome/Default/Cookies", usr.HomeDir), "path to Chrome cookies database file")
 	csvfilePtr := flag.String("out", fmt.Sprintf("output-%s.csv", nowStr), "output file for csv data")
 	reportfilePtr := flag.String("report", fmt.Sprintf("report-%s.txt", nowStr), "output file for data consistency report")
-	//checkConsistencyPtr := flag.Bool("consistency", false, "check incremental AWS/Cost Management consistency")
-	//consistencyMonthPtr := flag.String("month", "", "consistency check context month in format yyyy-mm")
-	//consistencyAccountIDPtr := flag.String("accountid", "", "consistency check context AWS account id")
+	checkPtr := flag.Bool("check", false, "checks AWS/Cost Management consistency, outputs AWS data")
 	flag.Parse()
 	// open output files
 	var err error
@@ -122,8 +120,8 @@ func main() {
 	// check if we should run in AWS mode
 	if *awsPtr {
 		log.Println("[main] note: using credentials and account from env AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY for aws pull")
-		if *monthPtr == "" {
-			log.Fatal("[main] aws mode requested, but no month given (use --month=yyyy-mm)")
+		if *monthPtr == "" || *costTypePtr == "" {
+			log.Fatal("[main] aws mode requested, but no month and/or costtype given (use --month=yyyy-mm, --costtype=type)")
 		}
 		accounts, err := getAccountSets()
 		if err != nil {
@@ -137,15 +135,13 @@ func main() {
 				if err != nil {
 					log.Fatalf("[main] error pulling data from AWS for account %s: %v", account.AccountID, err)
 				}	
-
-				err = checkResponseConsistencyAWS(account, result)
+				_, err = checkResponseConsistencyAWS(account, result)
 				if err != nil {
 					log.Printf("[main] error checking consistency of response for account data %s: %v", account.AccountID, err)
 					writeReport(reportfile, account.AccountID + ": " + err.Error())
 				} else {
 					log.Printf("[main] successful consistency check for data on account %s\n", account.AccountID)
 				}
-
 				normalized, err := normalizeResponseAWS(*monthPtr, account.AccountID, result)
 				if err != nil {
 					log.Fatalf("[main] error normalizing data from AWS for account %s: %v", account.AccountID, err)
@@ -200,8 +196,33 @@ func main() {
 		if err != nil {
 			log.Fatalf("[main] error writing header to output file: %v", err)
 		}
+		if *checkPtr {
+			// we want to pull from both sources and crosscheck
+			log.Println("[main] check mode: pulling data from Cost Management and AWS, crosschecking totals")
+			log.Println("[main] note: using credentials and account from env AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY for aws pull")
+			log.Println("[main] note: output CSV will use Cost Management data for breakdown costs")
+		}
 		for _, account := range(accountList) {
-			log.Printf("[main] pulling data for account %s (group %s)\n", account.AccountID, group)			
+			var totalAWS float64
+			if *checkPtr {
+				// we want to pull from both sources and crosscheck
+				if *monthPtr == "" || *costTypePtr == "" {
+					log.Fatal("[main] aws mode requested, but no month and/or costtype given (use --month=yyyy-mm, --costtype=type)")
+				}
+				log.Printf("[main] pulling AWS data for account %s (group %s)\n", account.AccountID, group)			
+				result, err := pullAWSData(account.AccountID, *monthPtr, *costTypePtr)
+				if err != nil {
+					log.Fatalf("[main] error pulling data from AWS for account %s: %v", account.AccountID, err)
+				}	
+				totalAWS, err = checkResponseConsistencyAWS(account, result)
+				if err != nil {
+					log.Printf("[main] error checking consistency of response for account data %s: %v", account.AccountID, err)
+					writeReport(reportfile, account.AccountID + " (AWS): " + err.Error())
+				} else {
+					log.Printf("[main] successful consistency check for data on account %s\n", account.AccountID)
+				}
+			}		
+			log.Printf("[main] pulling cost management data for account %s (group %s)\n", account.AccountID, group)			
 			result, err := pullData(client, account.AccountID, cookieDeserialized)
 			if err != nil {
 				log.Fatalf("[main] error pulling data from service: %v", err)
@@ -210,12 +231,19 @@ func main() {
 			if err != nil {
 				log.Fatalf("[main] error parsing data from service: %v", err)
 			}
-			err = checkResponseConsistencyCM(account, parsed)
+			totalCM, err := checkResponseConsistencyCM(account, parsed)
 			if err != nil {
 				log.Printf("[main] error checking consistency of response for account data %s: %v", account.AccountID, err)
-				writeReport(reportfile, account.AccountID + ": " + err.Error())
+				writeReport(reportfile, account.AccountID + " (CM): " + err.Error())
 			} else {
 				log.Printf("[main] successful consistency check for data on account %s\n", account.AccountID)
+			}
+			if *checkPtr {
+				// check if totals from AWS and CM are consistent
+				if math.Round(totalAWS*100)/100 != math.Round(totalCM*100)/100 {
+					log.Printf("[main] error checking consistency of totals from AWS and CM for account %s: aws = %f; cm = %f", account.AccountID, totalAWS, totalCM)
+					writeReport(reportfile, fmt.Sprintf("[main] error checking consistency of totals from AWS and CM for account %s: aws = %f; cm = %f", account.AccountID, totalAWS, totalCM))
+				}		
 			}
 			normalized, err := normalizeResponseCostManagement(parsed)
 			if err != nil {
@@ -483,15 +511,15 @@ func normalizeResponseCostManagement(response *Response) ([]string, error) {
 	return output, nil
 }
 
-func checkResponseConsistencyCM(account AccountEntry, response *Response) error {
+func checkResponseConsistencyCM(account AccountEntry, response *Response) (float64, error) {
 	// TODO check base value consistence by comparing to a rough value given in the config
 	// check that there is exactly one entry in toplevel data
 	if len(response.Data) != 1 {
-		return fmt.Errorf("response data has length of %d instead of 1", len(response.Data))
+		return 0, fmt.Errorf("response data has length of %d instead of 1", len(response.Data))
 	}
 	// check that there is at least one service entry
 	if len(response.Data[0].Services) == 0 {
-		return errors.New("services array is empty")
+		return 0, errors.New("services array is empty")
 	}
 	var foundDate string = response.Data[0].Date
 	var foundUnit string = response.Meta.Total.Cost.Unit
@@ -499,22 +527,22 @@ func checkResponseConsistencyCM(account AccountEntry, response *Response) error 
 	for _, service := range(response.Data[0].Services) {
 		// check that there is exactly one value section in services
 		if len(service.Values) != 1 {
-			return fmt.Errorf("service %s has more than exactly one values section (length is %d)", service.Service, len(service.Values))
+			return 0, fmt.Errorf("service %s has more than exactly one values section (length is %d)", service.Service, len(service.Values))
 		}
 		// check date consistency
 		if foundDate != service.Values[0].Date {
-			return fmt.Errorf("service %s date stamp differs (%s vs %s)", service.Service, service.Values[0].Date, foundDate)
+			return 0, fmt.Errorf("service %s date stamp differs (%s vs %s)", service.Service, service.Values[0].Date, foundDate)
 		}
 		// check unit consistency
 		if foundUnit != service.Values[0].Cost.Unit {
-			return fmt.Errorf("service %s unit differs (%s vs %s)", service.Service, service.Values[0].Cost.Unit, foundUnit)
+			return 0, fmt.Errorf("service %s unit differs (%s vs %s)", service.Service, service.Values[0].Cost.Unit, foundUnit)
 		}
 		// add up value
 		total += service.Values[0].Cost.Value
 	}
 	// check totals of all services is same as total in meta
 	if math.Round(total*100)/100 != math.Round(response.Meta.Total.Cost.Value*100)/100 {
-		return fmt.Errorf("total cost differs from meta and total of services (%f vs %f)", response.Meta.Total.Cost.Value, total)
+		return 0, fmt.Errorf("total cost differs from meta and total of services (%f vs %f)", response.Meta.Total.Cost.Value, total)
 	}
 	// check account meta deviation if standardvalue is given
 	if account.Standardvalue > 0 {
@@ -522,13 +550,13 @@ func checkResponseConsistencyCM(account AccountEntry, response *Response) error 
 		diffAbs := math.Abs(diff)
 		diffPercent := (diffAbs / account.Standardvalue) * 100
 		if diffPercent > float64(account.Deviationpercent) {
-			return fmt.Errorf("deviation check failed: deviation is %.2f (%.2f%%), max deviation allowed is %d%% (value was %.2f, standard value %.2f)", diffAbs, diffPercent, account.Deviationpercent, total, account.Standardvalue)
+			return 0, fmt.Errorf("deviation check failed: deviation is %.2f (%.2f%%), max deviation allowed is %d%% (value was %.2f, standard value %.2f)", diffAbs, diffPercent, account.Deviationpercent, total, account.Standardvalue)
 		}	
 	}
-	return nil
+	return total, nil
 }
 
-func checkResponseConsistencyAWS(account AccountEntry, results map[string]float64) error {
+func checkResponseConsistencyAWS(account AccountEntry, results map[string]float64) (float64, error) {
 	var total float64 = 0
 	for _, value := range(results) {
 		// add up value
@@ -540,10 +568,10 @@ func checkResponseConsistencyAWS(account AccountEntry, results map[string]float6
 		diffAbs := math.Abs(diff)
 		diffPercent := (diffAbs / account.Standardvalue) * 100
 		if diffPercent > float64(account.Deviationpercent) {
-			return fmt.Errorf("deviation check failed: deviation is %.2f (%.2f%%), max deviation allowed is %d%% (value was %.2f, standard value %.2f)", diffAbs, diffPercent, account.Deviationpercent, total, account.Standardvalue)
+			return 0, fmt.Errorf("deviation check failed: deviation is %.2f (%.2f%%), max deviation allowed is %d%% (value was %.2f, standard value %.2f)", diffAbs, diffPercent, account.Deviationpercent, total, account.Standardvalue)
 		}	
 	}
-	return nil
+	return total, nil
 }
 
 func pullData(client *http.Client, accountID string, cookieMap map[string]string) ([]byte, error) {
