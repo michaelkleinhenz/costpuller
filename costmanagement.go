@@ -60,13 +60,15 @@ type ValueSection struct {
 
 // CMPuller implements the Cost Management query client.
 type CMPuller struct {
+	debug bool
 	httpClient *http.Client
 	cookieMap map[string]string
 }
 
 // NewCMPuller returns a new Cost Management client.
-func NewCMPuller(client *http.Client, cookieMap map[string]string) *CMPuller {
+func NewCMPuller(debug bool, client *http.Client, cookieMap map[string]string) *CMPuller {
 	cmp := new(CMPuller)
+	cmp.debug = debug
 	cmp.httpClient = client
 	cmp.cookieMap = cookieMap
 	return cmp
@@ -224,7 +226,7 @@ func (c *CMPuller) CheckResponseConsistency(account AccountEntry, response *Resp
 		diffAbs := math.Abs(diff)
 		diffPercent := (diffAbs / account.Standardvalue) * 100
 		if diffPercent > float64(account.Deviationpercent) {
-			return 0, fmt.Errorf("deviation check failed: deviation is %.2f (%.2f%%), max deviation allowed is %d%% (value was %.2f, standard value %.2f)", diffAbs, diffPercent, account.Deviationpercent, total, account.Standardvalue)
+			return total, fmt.Errorf("deviation check failed: deviation is %.2f (%.2f%%), max deviation allowed is %d%% (value was %.2f, standard value %.2f)", diffAbs, diffPercent, account.Deviationpercent, total, account.Standardvalue)
 		}	
 	}
 	return total, nil

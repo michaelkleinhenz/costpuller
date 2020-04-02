@@ -33,10 +33,12 @@ func main() {
 	nowStr := time.Now().Format("20060102150405")
 	// configure flags
 	modePtr := flag.String("mode", "aws", "run mode, needs to be one of aws, cm or crosscheck")
+	debugPtr := flag.Bool("debug", false, "outputs debug info")
+	accountsFilePtr := flag.String("accounts", "accounts.yaml", "file to read accounts list from")
 	monthPtr := flag.String("month", "", "context month in format yyyy-mm, only for aws or crosscheck modes")
 	costTypePtr := flag.String("costtype", "BlendedCost", "cost type to pull, only for aws or crosscheck modes, one of AmortizedCost, BlendedCost, NetAmortizedCost, NetUnblendedCost, NormalizedUsageAmount, UnblendedCost, and UsageQuantity")
 	cookiePtr := flag.String("cookie", "", "access cookie for cost management system in curl serialized format, only for cm or crosscheck modes")
-	readcookiePtr := flag.Bool("readcookie", false, "reads the cookie from the Chrome cookies database, only for cm or crosscheck modes")
+	readcookiePtr := flag.Bool("readcookie", true, "reads the cookie from the Chrome cookies database, only for cm or crosscheck modes")
 	cookieDbPtr := flag.String("cookiedb", fmt.Sprintf("%s/.config/google-chrome/Default/Cookies", usr.HomeDir), "path to Chrome cookies database file, only for cm or crosscheck modes")
 	csvfilePtr := flag.String("csv", fmt.Sprintf("output-%s.csv", nowStr), "output file for csv data")
 	reportfilePtr := flag.String("report", fmt.Sprintf("report-%s.txt", nowStr), "output file for data consistency report")
@@ -48,7 +50,7 @@ func main() {
 	// create data holder
 	csvData := make([][]string, 0)
 	// get account lists
-	accounts, err := getAccountSets()
+	accounts, err := getAccountSets(*accountsFilePtr)
 	if err != nil {
 		log.Fatalf("[main] error unmarshalling accounts file: %v", err)
 	}
@@ -71,7 +73,7 @@ func main() {
 		if *monthPtr == "" || *costTypePtr == "" {
 			log.Fatal("[main] aws mode requested, but no month and/or costtype given (use --month=yyyy-mm, --costtype=type)")
 		}
-		awsPuller := NewAWSPuller()
+		awsPuller := NewAWSPuller(*debugPtr)
 		for group, accountList := range(accounts) {
 			csvData = appendCSVHeader(csvData, group)
 			for _, account := range(accountList) {
@@ -88,7 +90,7 @@ func main() {
 			log.Fatalf("[main] error retrieving cookie: %v", err)
 		}
 		httpClient := &http.Client{}
-		cmPuller := NewCMPuller(httpClient, cookie)
+		cmPuller := NewCMPuller(*debugPtr, httpClient, cookie)
 		for group, accountList := range(accounts) {
 			csvData = appendCSVHeader(csvData, group)
 			for _, account := range(accountList) {
@@ -109,8 +111,8 @@ func main() {
 			log.Fatalf("[main] error retrieving cookie: %v", err)
 		}
 		httpClient := &http.Client{}
-		cmPuller := NewCMPuller(httpClient, cookie)
-		awsPuller := NewAWSPuller()
+		cmPuller := NewCMPuller(*debugPtr, httpClient, cookie)
+		awsPuller := NewAWSPuller(*debugPtr)
 		for group, accountList := range(accounts) {
 			csvData = appendCSVHeader(csvData, group)
 			for _, account := range(accountList) {
@@ -128,7 +130,7 @@ func main() {
 				// check if totals from AWS and CM are consistent
 				if math.Round(totalAWS*100)/100 != math.Round(totalCM*100)/100 {
 					log.Printf("[main] error checking consistency of totals from AWS and CM for account %s: aws = %f; cm = %f", account.AccountID, totalAWS, totalCM)
-					writeReport(reportfile, fmt.Sprintf("[main] error checking consistency of totals from AWS and CM for account %s: aws = %f; cm = %f", account.AccountID, totalAWS, totalCM))
+					writeReport(reportfile, fmt.Sprintf("%s: error checking consistency of totals from AWS and CM: aws = %f; cm = %f", account.AccountID, totalAWS, totalCM))
 				}
 			}
 		}
@@ -172,7 +174,7 @@ func retrieveCookie(cookie string, readcookie bool, cookieDbFile string) (map[st
 }
 
 func pullAWS(awsPuller AWSPuller, reportfile *os.File, account AccountEntry, csvData [][]string, month string, costType string) ([][]string, float64, error) {
-	log.Printf("[pullAWS] pulling cost management data for account %s", account.AccountID)
+	log.Printf("[pullAWS] pulling AWS data for account %s", account.AccountID)
 	result, err := awsPuller.PullData(account.AccountID, month, costType)
 	if err != nil {
 		log.Fatalf("[pullAWS] error pulling data from AWS for account %s: %v", account.AccountID, err)
@@ -281,9 +283,9 @@ func writeReport(outfile *os.File, data string) error {
 	return nil
 }
 
-func getAccountSets() (map[string][]AccountEntry, error) {
+func getAccountSets(accountsFile string) (map[string][]AccountEntry, error) {
 	accounts := make(map[string][]AccountEntry)
-	yamlFile, err := ioutil.ReadFile("accounts.yaml")
+	yamlFile, err := ioutil.ReadFile(accountsFile)
 	if err != nil {
 			log.Printf("[getaccountsets] error reading accounts file: %v ", err)
 			return nil, err

@@ -14,11 +14,13 @@ import (
 
 // AWSPuller implements the AWS query client
 type AWSPuller struct {
+	debug bool
 }
 
 // NewAWSPuller returns a new AWS client.
-func NewAWSPuller() *AWSPuller {
+func NewAWSPuller(debug bool) *AWSPuller {
 	awsp := new(AWSPuller)
+	awsp.debug = debug
 	return awsp
 }
 
@@ -70,6 +72,10 @@ func (a *AWSPuller) PullData(accountID string, month string, costType string) (m
 		log.Printf("[pullawsdata] error retrieving aws service cost report: %v\n", err)
 		return nil, err
 	}
+	if a.debug {
+		log.Println("[pullawsdata] received service breakdown report:")
+		log.Println(*costAndUsageService)
+	}
 	costAndUsageTotal, err := svc.GetCostAndUsage(&costexplorer.GetCostAndUsageInput{
 		TimePeriod: &costexplorer.DateInterval{
 			Start: &dayStart,
@@ -87,6 +93,10 @@ func (a *AWSPuller) PullData(accountID string, month string, costType string) (m
 	if err != nil {
 		log.Printf("[pullawsdata] error retrieving aws total cost report: %v\n", err)
 		return nil, err
+	}
+	if a.debug {
+		log.Println("[pullawsdata] received total report:")
+		log.Println(*costAndUsageTotal)
 	}
 	// decode total value
 	totalAWSStr := *(*(*costAndUsageTotal.ResultsByTime[0]).Total[metricsBlendedCost]).Amount
@@ -207,8 +217,13 @@ func (a *AWSPuller) CheckResponseConsistency(account AccountEntry, results map[s
 		diffAbs := math.Abs(diff)
 		diffPercent := (diffAbs / account.Standardvalue) * 100
 		if diffPercent > float64(account.Deviationpercent) {
-			return 0, fmt.Errorf("deviation check failed: deviation is %.2f (%.2f%%), max deviation allowed is %d%% (value was %.2f, standard value %.2f)", diffAbs, diffPercent, account.Deviationpercent, total, account.Standardvalue)
+			return total, fmt.Errorf("deviation check failed: deviation is %.2f (%.2f%%), max deviation allowed is %d%% (value was %.2f, standard value %.2f)", diffAbs, diffPercent, account.Deviationpercent, total, account.Standardvalue)
 		}	
+	}
+	if a.debug {
+		log.Println("[CheckResponseConsistency] service struct:")
+		log.Println(results)
+		log.Printf("[CheckResponseConsistency] total retrieved from service struct is %f", total)
 	}
 	return total, nil
 }
