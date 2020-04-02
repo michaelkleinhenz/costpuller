@@ -36,7 +36,7 @@ func main() {
 	debugPtr := flag.Bool("debug", false, "outputs debug info")
 	accountsFilePtr := flag.String("accounts", "accounts.yaml", "file to read accounts list from")
 	monthPtr := flag.String("month", "", "context month in format yyyy-mm, only for aws or crosscheck modes")
-	costTypePtr := flag.String("costtype", "BlendedCost", "cost type to pull, only for aws or crosscheck modes, one of AmortizedCost, BlendedCost, NetAmortizedCost, NetUnblendedCost, NormalizedUsageAmount, UnblendedCost, and UsageQuantity")
+	costTypePtr := flag.String("costtype", "UnblendedCost", "cost type to pull, only for aws or crosscheck modes, one of AmortizedCost, BlendedCost, NetAmortizedCost, NetUnblendedCost, NormalizedUsageAmount, UnblendedCost, and UsageQuantity")
 	cookiePtr := flag.String("cookie", "", "access cookie for cost management system in curl serialized format, only for cm or crosscheck modes")
 	readcookiePtr := flag.Bool("readcookie", true, "reads the cookie from the Chrome cookies database, only for cm or crosscheck modes")
 	cookieDbPtr := flag.String("cookiedb", fmt.Sprintf("%s/.config/google-chrome/Default/Cookies", usr.HomeDir), "path to Chrome cookies database file, only for cm or crosscheck modes")
