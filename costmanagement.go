@@ -12,15 +12,15 @@ import (
 
 // Response describes the toplevel data structure
 type Response struct {
-	Meta MetaSection `json:"meta"`
+	Meta MetaSection   `json:"meta"`
 	Data []DataSection `json:"data"`
 }
 
 // MetaSection describes a child data structure
 type MetaSection struct {
-	Count float64 `json:"count"`
+	Count  float64       `json:"count"`
 	Filter FilterSection `json:"filter"`
-	Total TotalSection `json:"total"`
+	Total  TotalSection  `json:"total"`
 }
 
 // FilterSection describes a child data structure
@@ -35,34 +35,39 @@ type TotalSection struct {
 
 // CostSection describes a child data structure
 type CostSection struct {
+	TotalCost TotalCostSection `json:"total"`
+}
+
+// TotalCostSection describes a child data structure
+type TotalCostSection struct {
 	Value float64 `json:"value"`
-	Unit string `json:"units"`
+	Unit  string  `json:"units"`
 }
 
 // DataSection describes a child data structure
 type DataSection struct {
-	Date string `json:"date"`
+	Date     string           `json:"date"`
 	Services []ServiceSection `json:"services"`
 }
 
 // ServiceSection describes a child data structure
 type ServiceSection struct {
-	Service string `json:"service"`
-	Values []ValueSection `json:"values"`
+	Service string         `json:"service"`
+	Values  []ValueSection `json:"values"`
 }
 
 // ValueSection describes a child data structure
 type ValueSection struct {
-	Date string `json:"date"`
-	Service string `json:"service"`
-	Cost CostSection `json:"cost"`
+	Date    string      `json:"date"`
+	Service string      `json:"service"`
+	Cost    CostSection `json:"cost"`
 }
 
 // CMPuller implements the Cost Management query client.
 type CMPuller struct {
-	debug bool
+	debug      bool
 	httpClient *http.Client
-	cookieMap map[string]string
+	cookieMap  map[string]string
 }
 
 // NewCMPuller returns a new Cost Management client.
@@ -91,7 +96,7 @@ func (c *CMPuller) PullData(accountID string) ([]byte, error) {
 	q.Add("group_by[service]", "*")
 	req.URL.RawQuery = q.Encode()
 	// add cookies
-	for cookieKey, cookieValue := range(c.cookieMap) {
+	for cookieKey, cookieValue := range c.cookieMap {
 		thisCookie := new(http.Cookie)
 		thisCookie.Name = cookieKey
 		thisCookie.Value = cookieValue
@@ -139,11 +144,11 @@ func (c *CMPuller) ParseResponse(response []byte) (*Response, error) {
 
 // NormalizeResponse normalizes a Response object data into report categories.
 func (c *CMPuller) NormalizeResponse(response *Response) ([]string, error) {
-	// format is: 
+	// format is:
 	// date, clusterId, accountId, PO, clusterType, usageType, product, infra, numberUsers, dataTransfer, machines, storage, keyMgmnt, registrar, dns, other, tax, refund
 	// init fields with pending flag
 	output := make([]string, 18)
-	for idx := range(output) {
+	for idx := range output {
 		output[idx] = "PENDING"
 	}
 	// infra is always AWS
@@ -164,20 +169,20 @@ func (c *CMPuller) NormalizeResponse(response *Response) ([]string, error) {
 	output[17] = "0"
 	// nomalize cost values
 	var otherVal float64 = 0
-	for _, service := range(response.Data[0].Services) {
+	for _, service := range response.Data[0].Services {
 		switch service.Service {
 		case "AWSDataTransfer":
-			output[9] = fmt.Sprintf("%f", service.Values[0].Cost.Value)
+			output[9] = fmt.Sprintf("%f", service.Values[0].Cost.TotalCost.Value)
 		case "AmazonEC2":
-			output[10] = fmt.Sprintf("%f", service.Values[0].Cost.Value)
+			output[10] = fmt.Sprintf("%f", service.Values[0].Cost.TotalCost.Value)
 		case "AmazonS3":
-			output[11] = fmt.Sprintf("%f", service.Values[0].Cost.Value)
+			output[11] = fmt.Sprintf("%f", service.Values[0].Cost.TotalCost.Value)
 		case "awskms":
-			output[12] = fmt.Sprintf("%f", service.Values[0].Cost.Value)
+			output[12] = fmt.Sprintf("%f", service.Values[0].Cost.TotalCost.Value)
 		case "AmazonRoute53":
-			output[14] = fmt.Sprintf("%f", service.Values[0].Cost.Value)
+			output[14] = fmt.Sprintf("%f", service.Values[0].Cost.TotalCost.Value)
 		default:
-			otherVal += service.Values[0].Cost.Value
+			otherVal += service.Values[0].Cost.TotalCost.Value
 		}
 	}
 	// store other total
@@ -198,9 +203,9 @@ func (c *CMPuller) CheckResponseConsistency(account AccountEntry, response *Resp
 		return 0, errors.New("services array is empty")
 	}
 	var foundDate string = response.Data[0].Date
-	var foundUnit string = response.Meta.Total.Cost.Unit
+	var foundUnit string = response.Meta.Total.Cost.TotalCost.Unit
 	var total float64 = 0
-	for _, service := range(response.Data[0].Services) {
+	for _, service := range response.Data[0].Services {
 		// check that there is exactly one value section in services
 		if len(service.Values) != 1 {
 			return 0, fmt.Errorf("service %s has more than exactly one values section (length is %d)", service.Service, len(service.Values))
@@ -210,15 +215,15 @@ func (c *CMPuller) CheckResponseConsistency(account AccountEntry, response *Resp
 			return 0, fmt.Errorf("service %s date stamp differs (%s vs %s)", service.Service, service.Values[0].Date, foundDate)
 		}
 		// check unit consistency
-		if foundUnit != service.Values[0].Cost.Unit {
-			return 0, fmt.Errorf("service %s unit differs (%s vs %s)", service.Service, service.Values[0].Cost.Unit, foundUnit)
+		if foundUnit != service.Values[0].Cost.TotalCost.Unit {
+			return 0, fmt.Errorf("service %s unit differs (%s vs %s)", service.Service, service.Values[0].Cost.TotalCost.Unit, foundUnit)
 		}
 		// add up value
-		total += service.Values[0].Cost.Value
+		total += service.Values[0].Cost.TotalCost.Value
 	}
 	// check totals of all services is same as total in meta
-	if math.Round(total*100)/100 != math.Round(response.Meta.Total.Cost.Value*100)/100 {
-		return 0, fmt.Errorf("total cost differs from meta and total of services (%f vs %f)", response.Meta.Total.Cost.Value, total)
+	if math.Round(total*100)/100 != math.Round(response.Meta.Total.Cost.TotalCost.Value*100)/100 {
+		return 0, fmt.Errorf("total cost differs from meta and total of services (%f vs %f)", response.Meta.Total.Cost.TotalCost.Value, total)
 	}
 	// check account meta deviation if standardvalue is given
 	if account.Standardvalue > 0 {
@@ -227,7 +232,7 @@ func (c *CMPuller) CheckResponseConsistency(account AccountEntry, response *Resp
 		diffPercent := (diffAbs / account.Standardvalue) * 100
 		if diffPercent > float64(account.Deviationpercent) {
 			return total, fmt.Errorf("deviation check failed: deviation is %.2f (%.2f%%), max deviation allowed is %d%% (value was %.2f, standard value %.2f)", diffAbs, diffPercent, account.Deviationpercent, total, account.Standardvalue)
-		}	
+		}
 	}
 	return total, nil
 }
