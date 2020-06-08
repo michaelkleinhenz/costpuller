@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/user"
+	"sort"
 	"strings"
 	"time"
 
@@ -51,6 +52,7 @@ func main() {
 	csvData := make([][]string, 0)
 	// get account lists
 	accounts, err := getAccountSets(*accountsFilePtr)
+	sortedAccountKeys := sortedKeys(accounts)
 	if err != nil {
 		log.Fatalf("[main] error unmarshalling accounts file: %v", err)
 	}
@@ -74,7 +76,9 @@ func main() {
 			log.Fatal("[main] aws mode requested, but no month and/or costtype given (use --month=yyyy-mm, --costtype=type)")
 		}
 		awsPuller := NewAWSPuller(*debugPtr)
-		for group, accountList := range(accounts) {
+		for _, accountKey := range(sortedAccountKeys) {
+			group := accountKey
+			accountList := accounts[accountKey]
 			csvData = appendCSVHeader(csvData, group)
 			for _, account := range(accountList) {
 				log.Printf("[main] pulling data for account %s (group %s)\n", account.AccountID, group)			
@@ -91,7 +95,9 @@ func main() {
 		}
 		httpClient := &http.Client{}
 		cmPuller := NewCMPuller(*debugPtr, httpClient, cookie)
-		for group, accountList := range(accounts) {
+		for _, accountKey := range(sortedAccountKeys) {
+			group := accountKey
+			accountList := accounts[accountKey]
 			csvData = appendCSVHeader(csvData, group)
 			for _, account := range(accountList) {
 				log.Printf("[main] pulling data for account %s (group %s)\n", account.AccountID, group)			
@@ -113,7 +119,9 @@ func main() {
 		httpClient := &http.Client{}
 		cmPuller := NewCMPuller(*debugPtr, httpClient, cookie)
 		awsPuller := NewAWSPuller(*debugPtr)
-		for group, accountList := range(accounts) {
+		for _, accountKey := range(sortedAccountKeys) {
+			group := accountKey
+			accountList := accounts[accountKey]
 			csvData = appendCSVHeader(csvData, group)
 			for _, account := range(accountList) {
 				log.Printf("[main] pulling data for account %s (group %s)\n", account.AccountID, group)
@@ -142,6 +150,17 @@ func main() {
 	}
 	// done
 	log.Println("[main] operation done")
+}
+
+func sortedKeys(m map[string][]AccountEntry) ([]string) {
+	keys := make([]string, len(m))
+	i := 0
+	for k := range m {
+		keys[i] = k
+		i++
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func retrieveCookie(cookie string, readcookie bool, cookieDbFile string) (map[string]string, error) {
