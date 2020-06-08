@@ -44,6 +44,7 @@ func (a *AWSPuller) PullData(accountID string, month string, costType string) (m
 	svc := costexplorer.New(session)
 	granularity := "MONTHLY"
 	metricsBlendedCost := costType
+	log.Printf("[pullawsdata] using cost type %s", metricsBlendedCost)
 	dimensionLinkedAccountKey := "LINKED_ACCOUNT"
 	dimensionLinkedAccountValue := accountID
 	groupByDimension := "DIMENSION"

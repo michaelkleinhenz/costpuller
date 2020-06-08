@@ -1,4 +1,4 @@
-accounts.yaml
+accounts*.yaml
 .vscode
 output.csv
 __debug_bin
