@@ -48,7 +48,7 @@ func (a *AWSPuller) PullData(accountID string, month string, costType string) (m
 	dimensionLinkedAccountKey := "LINKED_ACCOUNT"
 	dimensionLinkedAccountValue := accountID
 	groupByDimension := "DIMENSION"
-	groupByServce := "SERVICE"
+	groupByService := "SERVICE"
 	costAndUsageService, err := svc.GetCostAndUsage(&costexplorer.GetCostAndUsageInput{
 		TimePeriod: &costexplorer.DateInterval{
 			Start: &dayStart,
@@ -65,7 +65,7 @@ func (a *AWSPuller) PullData(accountID string, month string, costType string) (m
 		GroupBy: []*costexplorer.GroupDefinition{
 			&costexplorer.GroupDefinition{
 				Type: &groupByDimension,
-				Key: &groupByServce,
+				Key: &groupByService,
 			},
 		},
 	})
@@ -148,28 +148,33 @@ func (a *AWSPuller) PullData(accountID string, month string, costType string) (m
 }
 
 // NormalizeResponse normalizes a Response object data into report categories.
-func (a *AWSPuller) NormalizeResponse(daterange string, accountID string, serviceResults map[string]float64) ([]string, error) {
+func (a *AWSPuller) NormalizeResponse(group string, daterange string, accountID string, serviceResults map[string]float64) ([]string, error) {
 	// format is: 
-	// date, clusterId, accountId, PO, clusterType, usageType, product, infra, numberUsers, dataTransfer, machines, storage, keyMgmnt, registrar, dns, other, tax, refund
-	output := make([]string, 18)
+	// group, date, clusterId, accountId, PO, clusterType, usageType, product, infra, numberUsers, dataTransfer, machines, storage, keyMgmnt, registrar, dns, other, tax, refund
+
+	// remove: 2 4 5 6 7 9 
+	output := make([]string, 13)
 	for idx := range(output) {
 		output[idx] = "PENDING"
 	}
+	// set group
+	output[0] = group
 	// infra is always AWS
-	output[7] = "AWS"
+	output[3] = "AWS"
 	// set date - we use the first service entry
-	output[0] = daterange
+	output[1] = daterange
 	// set clusterID
 	output[2] = accountID
 	// init cost values
+	output[4] = "0"
+	output[5] = "0"
+	output[6] = "0"
+	output[7] = "0"
+	output[8] = "0"
 	output[9] = "0"
 	output[10] = "0"
 	output[11] = "0"
-	output[12] = "0"
-	output[13] = "0"
-	output[14] = "0"
-	output[15] = "0"
-	output[17] = "0"	
+	output[12] = "0"	
 	// nomalize cost values
 	var ec2Val float64 = 0
 	var kmVal float64 = 0
@@ -177,31 +182,31 @@ func (a *AWSPuller) NormalizeResponse(daterange string, accountID string, servic
 	for key, value := range(serviceResults) {
 		switch key {
 		case "AWS Data Transfer":
-			output[9] = fmt.Sprintf("%f", value)
+			output[4] = fmt.Sprintf("%f", value)
 		case "Amazon Elastic Compute Cloud - Compute":
 			ec2Val += value
 		case "EC2 - Other":
 			ec2Val += value
 		case "Amazon Simple Storage Service":
-			output[11] = fmt.Sprintf("%f", value)
+			output[6] = fmt.Sprintf("%f", value)
 		case "AWS Key Management Service":
 			kmVal += value
 		case "AWS Secrets Manager":
 			kmVal += value
 		case "Amazon Route 53":
-			output[14] = fmt.Sprintf("%f", value)
+			output[9] = fmt.Sprintf("%f", value)
 		case "Tax":
-			output[16] = fmt.Sprintf("%f", value)
+			output[11] = fmt.Sprintf("%f", value)
 		default:
 			otherVal += value
 		}
 	}
 	// EC2
-	output[10] = fmt.Sprintf("%f", ec2Val)
+	output[5] = fmt.Sprintf("%f", ec2Val)
 	// key management
-	output[12] = fmt.Sprintf("%f", kmVal)
+	output[7] = fmt.Sprintf("%f", kmVal)
 	// store other total
-	output[15] = fmt.Sprintf("%f", otherVal)
+	output[10] = fmt.Sprintf("%f", otherVal)
 	return output, nil
 }
 

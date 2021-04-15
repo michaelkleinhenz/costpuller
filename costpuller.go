@@ -79,10 +79,10 @@ func main() {
 		for _, accountKey := range(sortedAccountKeys) {
 			group := accountKey
 			accountList := accounts[accountKey]
-			csvData = appendCSVHeader(csvData, group)
+			//csvData = appendCSVHeader(csvData, group)
 			for _, account := range(accountList) {
 				log.Printf("[main] pulling data for account %s (group %s)\n", account.AccountID, group)			
-				csvData, _, err = pullAWS(*awsPuller, reportfile, account, csvData, *monthPtr, *costTypePtr)
+				csvData, _, err = pullAWS(*awsPuller, reportfile, group, account, csvData, *monthPtr, *costTypePtr)
 				if err != nil {
 					log.Fatalf("[main] error pulling data: %v", err)
 				}
@@ -98,7 +98,7 @@ func main() {
 		for _, accountKey := range(sortedAccountKeys) {
 			group := accountKey
 			accountList := accounts[accountKey]
-			csvData = appendCSVHeader(csvData, group)
+			//csvData = appendCSVHeader(csvData, group)
 			for _, account := range(accountList) {
 				log.Printf("[main] pulling data for account %s (group %s)\n", account.AccountID, group)			
 				csvData, _, err = pullCostManagement(*cmPuller, reportfile, account, csvData, *monthPtr)
@@ -122,11 +122,11 @@ func main() {
 		for _, accountKey := range(sortedAccountKeys) {
 			group := accountKey
 			accountList := accounts[accountKey]
-			csvData = appendCSVHeader(csvData, group)
+			//csvData = appendCSVHeader(csvData, group)
 			for _, account := range(accountList) {
 				log.Printf("[main] pulling data for account %s (group %s)\n", account.AccountID, group)
 				var totalAWS float64
-				_, totalAWS, err = pullAWS(*awsPuller, reportfile, account, nil, *monthPtr, *costTypePtr)
+				_, totalAWS, err = pullAWS(*awsPuller, reportfile, group, account, nil, *monthPtr, *costTypePtr)
 				if err != nil {
 					log.Fatalf("[main] error pulling data: %v", err)
 				}
@@ -192,7 +192,7 @@ func retrieveCookie(cookie string, readcookie bool, cookieDbFile string) (map[st
 	return nil, errors.New("[retrieveCookie] either --readcookie or --cookie=<cookie> needs to be given")
 }
 
-func pullAWS(awsPuller AWSPuller, reportfile *os.File, account AccountEntry, csvData [][]string, month string, costType string) ([][]string, float64, error) {
+func pullAWS(awsPuller AWSPuller, reportfile *os.File, group string, account AccountEntry, csvData [][]string, month string, costType string) ([][]string, float64, error) {
 	log.Printf("[pullAWS] pulling AWS data for account %s", account.AccountID)
 	result, err := awsPuller.PullData(account.AccountID, month, costType)
 	if err != nil {
@@ -206,7 +206,7 @@ func pullAWS(awsPuller AWSPuller, reportfile *os.File, account AccountEntry, csv
 	} else {
 		log.Printf("[pullAWS] successful consistency check for data on account %s\n", account.AccountID)
 	}
-	normalized, err := awsPuller.NormalizeResponse(month, account.AccountID, result)
+	normalized, err := awsPuller.NormalizeResponse(group, month, account.AccountID, result)
 	if err != nil {
 		log.Fatalf("[pullAWS] error normalizing data from AWS for account %s: %v", account.AccountID, err)
 		return csvData, 0, err
