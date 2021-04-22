@@ -25,9 +25,12 @@ type AccountEntry struct {
 	AccountID string `yaml:"accountid"`
 	Standardvalue float64	`yaml:"standardvalue"`
 	Deviationpercent int  `yaml:"deviationpercent"`
+	Category string `yaml:"category"`
+	Description string `yaml:"description"`
 }
 
 func main() {
+	var err error
 	log.Println("[main] costpuller starting..")
 	// bootstrap
 	usr, _ := user.Current()
@@ -36,6 +39,7 @@ func main() {
 	modePtr := flag.String("mode", "aws", "run mode, needs to be one of aws, cm or crosscheck")
 	debugPtr := flag.Bool("debug", false, "outputs debug info")
 	accountsFilePtr := flag.String("accounts", "accounts.yaml", "file to read accounts list from")
+	taggedAccountsPtr := flag.Bool("taggedaccounts", false, "use the AWS tags as account list source")
 	monthPtr := flag.String("month", "", "context month in format yyyy-mm, only for aws or crosscheck modes")
 	costTypePtr := flag.String("costtype", "UnblendedCost", "cost type to pull, only for aws or crosscheck modes, one of AmortizedCost, BlendedCost, NetAmortizedCost, NetUnblendedCost, NormalizedUsageAmount, UnblendedCost, and UsageQuantity")
 	cookiePtr := flag.String("cookie", "", "access cookie for cost management system in curl serialized format, only for cm or crosscheck modes")
@@ -45,13 +49,23 @@ func main() {
 	reportfilePtr := flag.String("report", fmt.Sprintf("report-%s.txt", nowStr), "output file for data consistency report")
 	flag.Parse()
 	// open output files
-	var err error
 	log.Printf("[main] using csv output file %s\n", *csvfilePtr)
 	log.Printf("[main] using report output file %s\n", *reportfilePtr)
 	// create data holder
 	csvData := make([][]string, 0)
+	// create aws puller instance
+	awsPuller := NewAWSPuller(*debugPtr)
 	// get account lists
-	accounts, err := getAccountSets(*accountsFilePtr)
+	var accounts map[string][]AccountEntry
+	if *taggedAccountsPtr {
+		accounts, err = getAccountSetsFromAWS(awsPuller)
+	} else {
+		// we pull accounts from file
+		accounts, err = getAccountSetsFromFile(*accountsFilePtr)
+	}
+	if err != nil {
+		log.Fatalf("[main] error getting accounts list: %v", err)
+	}
 	sortedAccountKeys := sortedKeys(accounts)
 	if err != nil {
 		log.Fatalf("[main] error unmarshalling accounts file: %v", err)
@@ -75,7 +89,6 @@ func main() {
 		if *monthPtr == "" || *costTypePtr == "" {
 			log.Fatal("[main] aws mode requested, but no month and/or costtype given (use --month=yyyy-mm, --costtype=type)")
 		}
-		awsPuller := NewAWSPuller(*debugPtr)
 		for _, accountKey := range(sortedAccountKeys) {
 			group := accountKey
 			accountList := accounts[accountKey]
@@ -118,7 +131,6 @@ func main() {
 		}
 		httpClient := &http.Client{}
 		cmPuller := NewCMPuller(*debugPtr, httpClient, cookie)
-		awsPuller := NewAWSPuller(*debugPtr)
 		for _, accountKey := range(sortedAccountKeys) {
 			group := accountKey
 			accountList := accounts[accountKey]
@@ -302,7 +314,7 @@ func writeReport(outfile *os.File, data string) error {
 	return nil
 }
 
-func getAccountSets(accountsFile string) (map[string][]AccountEntry, error) {
+func getAccountSetsFromFile(accountsFile string) (map[string][]AccountEntry, error) {
 	accounts := make(map[string][]AccountEntry)
 	yamlFile, err := ioutil.ReadFile(accountsFile)
 	if err != nil {
@@ -314,5 +326,38 @@ func getAccountSets(accountsFile string) (map[string][]AccountEntry, error) {
 			log.Fatalf("[getaccountsets] error unmarshalling accounts file: %v", err)
 			return nil, err
 	}
+	// set category manually on all entries
+	for category, accountEntries := range accounts {
+		for _, accountEntry := range accountEntries {
+			accountEntry.Category = category
+		}
+	}
 	return accounts, nil
+}
+
+func getAccountSetsFromAWS(awsPuller *AWSPuller) (map[string][]AccountEntry, error) {
+	metadata, err := awsPuller.GetAWSAccountMetadata()
+	if err != nil {
+		log.Fatalf("[main] error getting accounts list from metadata: %v", err)
+	}
+	accounts := make(map[string][]AccountEntry)
+	for accountID, accountMetadata := range metadata {
+		if category, ok := accountMetadata[AWSTagCostpullerCategory]; ok {
+			description := accountMetadata[AWSMetadataDescription]
+			status := accountMetadata[AWSMetadataStatus]
+			if status == "ACTIVE" {
+				if _, ok := accounts[category]; !ok {
+					accounts[category] = []AccountEntry{}
+				}
+				accounts[category] = append(accounts[category], AccountEntry{
+					AccountID:        accountID,
+					Standardvalue:    0,
+					Deviationpercent: 0,
+					Category:         category,
+					Description:      description,
+				})	
+			}
+		}
+	}
+	return accounts, nil	
 }

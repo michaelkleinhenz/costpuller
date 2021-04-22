@@ -9,17 +9,27 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/costexplorer"
+	"github.com/aws/aws-sdk-go/service/organizations"
 	"github.com/jinzhu/now"
 )
 
+const AWSTagCostpullerCategory = "costpuller_category"
+
+const AWSMetadataDescription = "description"
+const AWSMetadataStatus = "status"
+
 // AWSPuller implements the AWS query client
 type AWSPuller struct {
+	session *session.Session
 	debug bool
 }
 
 // NewAWSPuller returns a new AWS client.
 func NewAWSPuller(debug bool) *AWSPuller {
 	awsp := new(AWSPuller)
+	awsp.session = session.Must(session.NewSessionWithOptions(session.Options{
+    SharedConfigState: session.SharedConfigEnable,
+	}))
 	awsp.debug = debug
 	return awsp
 }
@@ -38,10 +48,7 @@ func (a *AWSPuller) PullData(accountID string, month string, costType string) (m
 	dayEnd := endOfMonth.Format("2006-01-02")
 	log.Printf("[pullawsdata] using date range %s to %s", dayStart, dayEnd)
 	// retrieve AWS cost
-	session := session.Must(session.NewSessionWithOptions(session.Options{
-    SharedConfigState: session.SharedConfigEnable,
-	}))
-	svc := costexplorer.New(session)
+	svc := costexplorer.New(a.session)
 	granularity := "MONTHLY"
 	metricsBlendedCost := costType
 	log.Printf("[pullawsdata] using cost type %s", metricsBlendedCost)
@@ -232,4 +239,89 @@ func (a *AWSPuller) CheckResponseConsistency(account AccountEntry, results map[s
 		log.Printf("[CheckResponseConsistency] total retrieved from service struct is %f", total)
 	}
 	return total, nil
+}
+
+// GetAWSAccountMetadata returns a map with accountIDs as keys and metadata key-value pairs map as value.
+func (a *AWSPuller) GetAWSAccountMetadata() (map[string]map[string]string, error) {
+	// get account list and basic metadata
+	accounts, err := a.getAllAWSAccountData()
+	if err != nil {
+		return nil, err
+	}
+	// augment tags
+	for accountID, _ := range accounts { 
+		tags, err := a.getTagsForAWSAccount(accountID)
+		if err != nil {
+			return nil, err
+		}
+		for tagKey, tagValue := range tags {
+			accounts[accountID][tagKey] = tagValue
+		}
+	}
+	return accounts, nil
+}
+
+func (a *AWSPuller) getTagsForAWSAccount(accountID string) (map[string]string, error) {
+	result := map[string]string{}
+	svo := organizations.New(a.session)
+	output, err := svo.ListTagsForResource(&organizations.ListTagsForResourceInput{
+		NextToken:  nil,
+		ResourceId: &accountID,
+	})
+	if err != nil {
+		log.Printf("[pullawsdata] error getting account tags: %v", err)
+		return nil, err
+	}
+	for _, e := range output.Tags {
+		result[*e.Key] = *e.Value
+	}
+	for output.NextToken != nil && *output.NextToken != "" {
+		output, err = svo.ListTagsForResource(&organizations.ListTagsForResourceInput{
+			ResourceId: &accountID,
+			NextToken:  output.NextToken,
+		})
+		if err != nil {
+			log.Printf("[pullawsdata] error getting account tags: %v", err)
+			return nil, err
+		}
+		for _, e := range output.Tags {
+			result[*e.Key] = *e.Value
+		}
+	}
+	return result, nil
+}
+
+func (a *AWSPuller) pullAccountData(svo *organizations.Organizations, result *map[string]map[string]string, nextToken *string) (*string, error) {
+	limit := int64(10)
+	output, err := svo.ListAccounts(&organizations.ListAccountsInput{
+		MaxResults: &limit,
+		NextToken:  nextToken,
+	})
+	if err != nil {
+		log.Printf("[pullawsdata] error getting account list: %v", err)
+		return nil, err
+	}
+	for _, e := range output.Accounts {
+		(*result)[*e.Id] = map[string]string{
+			AWSMetadataDescription: *e.Name,
+			AWSMetadataStatus: *e.Status,
+		}
+	}		
+	return output.NextToken, nil
+}
+
+func (a *AWSPuller) getAllAWSAccountData() (map[string]map[string]string, error) {
+	result := map[string]map[string]string{}
+	svo := organizations.New(a.session)
+	nextToken, err := a.pullAccountData(svo, &result, nil)
+	if err != nil {
+		return nil, err
+	}
+	for nextToken != nil && *nextToken != "" {
+		nextToken, err = a.pullAccountData(svo, &result, nextToken)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
 }
