@@ -325,3 +325,28 @@ func (a *AWSPuller) getAllAWSAccountData() (map[string]map[string]string, error)
 	}
 	return result, nil
 }
+
+func (a *AWSPuller) WriteAWSTags(accounts map[string][]AccountEntry) (error) {
+	svo := organizations.New(a.session)
+	catgoryTag := AWSTagCostpullerCategory
+	for category, accountEntries := range accounts {
+		for _, accountEntry := range accountEntries {
+			fmt.Printf("setting tag %s == %s for account %s...", catgoryTag, category, accountEntry.AccountID)
+			_, err := svo.TagResource(&organizations.TagResourceInput{
+				ResourceId: &accountEntry.AccountID,
+				Tags:       []*organizations.Tag{
+					&organizations.Tag{
+						Key: &catgoryTag, 
+						Value: &category,	
+					},
+				},
+			})
+			if err != nil {
+				return err
+			}
+			fmt.Println("done.")
+
+		}
+	}
+	return nil
+}

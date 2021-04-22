@@ -38,6 +38,7 @@ func main() {
 	// configure flags
 	modePtr := flag.String("mode", "aws", "run mode, needs to be one of aws, cm or crosscheck")
 	debugPtr := flag.Bool("debug", false, "outputs debug info")
+	awsWriteTagsPtr := flag.Bool("awswritetags", false, "write tags to AWS accounts (USE WITH CARE!)")
 	accountsFilePtr := flag.String("accounts", "accounts.yaml", "file to read accounts list from")
 	taggedAccountsPtr := flag.Bool("taggedaccounts", false, "use the AWS tags as account list source")
 	monthPtr := flag.String("month", "", "context month in format yyyy-mm, only for aws or crosscheck modes")
@@ -48,13 +49,22 @@ func main() {
 	csvfilePtr := flag.String("csv", fmt.Sprintf("output-%s.csv", nowStr), "output file for csv data")
 	reportfilePtr := flag.String("report", fmt.Sprintf("report-%s.txt", nowStr), "output file for data consistency report")
 	flag.Parse()
+	// create aws puller instance
+	awsPuller := NewAWSPuller(*debugPtr)
+	if *awsWriteTagsPtr {
+		// we pull accounts from file
+		accounts, err := getAccountSetsFromFile(*accountsFilePtr)
+		if err != nil {
+			log.Fatalf("[main] error getting accounts list: %v", err)
+		}
+		awsPuller.WriteAWSTags(accounts)
+		os.Exit(0)
+	}
 	// open output files
 	log.Printf("[main] using csv output file %s\n", *csvfilePtr)
 	log.Printf("[main] using report output file %s\n", *reportfilePtr)
 	// create data holder
 	csvData := make([][]string, 0)
-	// create aws puller instance
-	awsPuller := NewAWSPuller(*debugPtr)
 	// get account lists
 	var accounts map[string][]AccountEntry
 	if *taggedAccountsPtr {
