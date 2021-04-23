@@ -39,6 +39,7 @@ func main() {
 	modePtr := flag.String("mode", "aws", "run mode, needs to be one of aws, cm or crosscheck")
 	debugPtr := flag.Bool("debug", false, "outputs debug info")
 	awsWriteTagsPtr := flag.Bool("awswritetags", false, "write tags to AWS accounts (USE WITH CARE!)")
+	awsCheckTagsPtr := flag.Bool("checktags", false, "checks all AWS accounts available for correct tag setting.")
 	accountsFilePtr := flag.String("accounts", "accounts.yaml", "file to read accounts list from")
 	taggedAccountsPtr := flag.Bool("taggedaccounts", false, "use the AWS tags as account list source")
 	monthPtr := flag.String("month", "", "context month in format yyyy-mm, only for aws or crosscheck modes")
@@ -57,7 +58,17 @@ func main() {
 		if err != nil {
 			log.Fatalf("[main] error getting accounts list: %v", err)
 		}
-		awsPuller.WriteAWSTags(accounts)
+		err = awsPuller.WriteAWSTags(accounts)
+		if err != nil {
+			log.Fatalf("[main] error writing account tag: %v", err)
+		}
+		os.Exit(0)
+	}
+	if *awsCheckTagsPtr {
+		_, err := getAccountSetsFromAWS(awsPuller)
+		if err != nil {
+			log.Fatalf("[main] error getting accounts list: %v", err)
+		}
 		os.Exit(0)
 	}
 	// open output files
@@ -354,6 +365,7 @@ func getAccountSetsFromAWS(awsPuller *AWSPuller) (map[string][]AccountEntry, err
 	for accountID, accountMetadata := range metadata {
 		if category, ok := accountMetadata[AWSTagCostpullerCategory]; ok {
 			description := accountMetadata[AWSMetadataDescription]
+			log.Printf("tagged category (\"%s\") found for account %s (\"%s\")", category, accountID, description)
 			status := accountMetadata[AWSMetadataStatus]
 			if status == "ACTIVE" {
 				if _, ok := accounts[category]; !ok {
@@ -367,6 +379,9 @@ func getAccountSetsFromAWS(awsPuller *AWSPuller) (map[string][]AccountEntry, err
 					Description:      description,
 				})	
 			}
+		} else {
+			// account without category tag
+			log.Printf("ERRROR: account %s does not have an aws tag set for category (\"%s\")", accountID, accountMetadata[AWSMetadataDescription])
 		}
 	}
 	return accounts, nil	
