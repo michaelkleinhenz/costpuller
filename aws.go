@@ -249,7 +249,12 @@ func (a *AWSPuller) GetAWSAccountMetadata() (map[string]map[string]string, error
 		return nil, err
 	}
 	// augment tags
+	log.Println("[GetAWSAccountMetadata] starting tags pull for accounts")
+	idx := 0
 	for accountID, _ := range accounts { 
+		idx++
+		log.Printf("[GetAWSAccountMetadata] pulling tags for account %s (%d of %d)", accountID, idx, len(accounts))
+
 		tags, err := a.getTagsForAWSAccount(accountID)
 		if err != nil {
 			return nil, err
@@ -313,16 +318,20 @@ func (a *AWSPuller) pullAccountData(svo *organizations.Organizations, result *ma
 func (a *AWSPuller) getAllAWSAccountData() (map[string]map[string]string, error) {
 	result := map[string]map[string]string{}
 	svo := organizations.New(a.session)
+	log.Println("[pullawsdata] pulling all accounts metadata")
 	nextToken, err := a.pullAccountData(svo, &result, nil)
 	if err != nil {
 		return nil, err
 	}
 	for nextToken != nil && *nextToken != "" {
+		log.Printf("[pullawsdata] pulling more accounts metadata, pulled %d accounts", len(result))
 		nextToken, err = a.pullAccountData(svo, &result, nextToken)
 		if err != nil {
+			log.Printf("[pullawsdata] error getting account list: %v", err)
 			return nil, err
 		}
 	}
+	log.Printf("[pullawsdata] done pulling accounts metadata, total pulled accounts: %d", len(result))
 	return result, nil
 }
 

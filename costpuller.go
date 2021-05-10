@@ -65,6 +65,7 @@ func main() {
 		os.Exit(0)
 	}
 	if *awsCheckTagsPtr {
+		log.Println("[main] checking tags on AWS")
 		_, err := getAccountSetsFromAWS(awsPuller)
 		if err != nil {
 			log.Fatalf("[main] error getting accounts list: %v", err)
@@ -357,10 +358,12 @@ func getAccountSetsFromFile(accountsFile string) (map[string][]AccountEntry, err
 }
 
 func getAccountSetsFromAWS(awsPuller *AWSPuller) (map[string][]AccountEntry, error) {
+	log.Println("[main] initiating account metadata pull")
 	metadata, err := awsPuller.GetAWSAccountMetadata()
 	if err != nil {
 		log.Fatalf("[main] error getting accounts list from metadata: %v", err)
 	}
+	log.Println("[main] processing account metadata pull")
 	accounts := make(map[string][]AccountEntry)
 	for accountID, accountMetadata := range metadata {
 		if category, ok := accountMetadata[AWSTagCostpullerCategory]; ok {
