@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"math"
 	"net/http"
@@ -63,26 +63,30 @@ type ValueSection struct {
 	Cost    CostSection `json:"cost"`
 }
 
-// CMPuller implements the Cost Management query client.
-type CMPuller struct {
+// CmPuller implements the Cost Management query client.
+type CmPuller struct {
 	debug      bool
 	httpClient *http.Client
 	cookieMap  map[string]string
 }
 
-// NewCMPuller returns a new Cost Management client.
-func NewCMPuller(debug bool, client *http.Client, cookieMap map[string]string) *CMPuller {
-	cmp := new(CMPuller)
+// NewCmPuller returns a new Cost Management client.
+func NewCmPuller(cookieMap map[string]string, debug bool) *CmPuller {
+	cmp := new(CmPuller)
 	cmp.debug = debug
-	cmp.httpClient = client
+	cmp.httpClient = &http.Client{}
 	cmp.cookieMap = cookieMap
 	return cmp
 }
 
 // PullData retrieves a raw data set.
-func (c *CMPuller) PullData(accountID string) ([]byte, error) {
+func (c *CmPuller) PullData(accountID string) ([]byte, error) {
 	// create request
-	req, err := http.NewRequest("GET", "https://cloud.redhat.com/api/cost-management/v1/reports/aws/costs/", nil)
+	req, err := http.NewRequest(
+		"GET",
+		"https://cloud.redhat.com/api/cost-management/v1/reports/aws/costs/",
+		nil,
+	)
 	if err != nil {
 		log.Printf("[pulldata] error creating request: %v ", err)
 		return nil, err
@@ -117,12 +121,17 @@ func (c *CMPuller) PullData(accountID string) ([]byte, error) {
 	// check response
 	if resp.StatusCode != 200 {
 		log.Println("[pulldata] error pulling data from server")
-		bodyBytes, _ := ioutil.ReadAll(resp.Body)
+		bodyBytes, _ := io.ReadAll(resp.Body)
 		bodyStr := string(bodyBytes)
-		return nil, fmt.Errorf("error fetching data from service, returned status %d, url was %s\nBody: %s", resp.StatusCode, req.URL.String(), bodyStr)
+		return nil, fmt.Errorf(
+			"error fetching data from service, returned status %d, url was %s\nBody: %s",
+			resp.StatusCode,
+			req.URL.String(),
+			bodyStr,
+		)
 	}
 	// read body
-	bodyBytes, err := ioutil.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Printf("[pulldata] error reading body data: %v ", err)
 		return nil, err
@@ -132,7 +141,7 @@ func (c *CMPuller) PullData(accountID string) ([]byte, error) {
 }
 
 // ParseResponse parses a raw response into a Response object.
-func (c *CMPuller) ParseResponse(response []byte) (*Response, error) {
+func (c *CmPuller) ParseResponse(response []byte) (*Response, error) {
 	responseData := new(Response)
 	err := json.Unmarshal(response, responseData)
 	if err != nil {
@@ -143,9 +152,10 @@ func (c *CMPuller) ParseResponse(response []byte) (*Response, error) {
 }
 
 // NormalizeResponse normalizes a Response object data into report categories.
-func (c *CMPuller) NormalizeResponse(response *Response) ([]string, error) {
+func (c *CmPuller) NormalizeResponse(response *Response) ([]string, error) {
 	// format is:
-	// date, clusterId, accountId, PO, clusterType, usageType, product, infra, numberUsers, dataTransfer, machines, storage, keyMgmnt, registrar, dns, other, tax, refund
+	//   date, clusterId, accountId, PO, clusterType, usageType, product, infra, numberUsers,
+	//   dataTransfer, machines, storage, keyMgmnt, registrar, dns, other, tax, refund
 	// init fields with pending flag
 	output := make([]string, 18)
 	for idx := range output {
@@ -167,7 +177,7 @@ func (c *CMPuller) NormalizeResponse(response *Response) ([]string, error) {
 	output[15] = "0"
 	output[16] = "0"
 	output[17] = "0"
-	// nomalize cost values
+	// normalize cost values
 	var otherVal float64 = 0
 	for _, service := range response.Data[0].Services {
 		switch service.Service {
@@ -192,7 +202,7 @@ func (c *CMPuller) NormalizeResponse(response *Response) ([]string, error) {
 }
 
 // CheckResponseConsistency checks the response consistency with various checks. Returns the calculated total.
-func (c *CMPuller) CheckResponseConsistency(account AccountEntry, response *Response) (float64, error) {
+func (c *CmPuller) CheckResponseConsistency(account AccountEntry, response *Response) (float64, error) {
 	// TODO check base value consistence by comparing to a rough value given in the config
 	// check that there is exactly one entry in toplevel data
 	if len(response.Data) != 1 {
@@ -202,36 +212,61 @@ func (c *CMPuller) CheckResponseConsistency(account AccountEntry, response *Resp
 	if len(response.Data[0].Services) == 0 {
 		return 0, errors.New("services array is empty")
 	}
-	var foundDate string = response.Data[0].Date
-	var foundUnit string = response.Meta.Total.Cost.TotalCost.Unit
+	foundDate := response.Data[0].Date
+	foundUnit := response.Meta.Total.Cost.TotalCost.Unit
 	var total float64 = 0
 	for _, service := range response.Data[0].Services {
 		// check that there is exactly one value section in services
 		if len(service.Values) != 1 {
-			return 0, fmt.Errorf("service %s has more than exactly one values section (length is %d)", service.Service, len(service.Values))
+			return 0, fmt.Errorf(
+				"service %s has more than exactly one values section (length is %d)",
+				service.Service,
+				len(service.Values),
+			)
 		}
 		// check date consistency
 		if foundDate != service.Values[0].Date {
-			return 0, fmt.Errorf("service %s date stamp differs (%s vs %s)", service.Service, service.Values[0].Date, foundDate)
+			return 0, fmt.Errorf(
+				"service %s date stamp differs (%s vs %s)",
+				service.Service,
+				service.Values[0].Date,
+				foundDate,
+			)
 		}
 		// check unit consistency
 		if foundUnit != service.Values[0].Cost.TotalCost.Unit {
-			return 0, fmt.Errorf("service %s unit differs (%s vs %s)", service.Service, service.Values[0].Cost.TotalCost.Unit, foundUnit)
+			return 0, fmt.Errorf(
+				"service %s unit differs (%s vs %s)",
+				service.Service,
+				service.Values[0].Cost.TotalCost.Unit,
+				foundUnit,
+			)
 		}
 		// add up value
 		total += service.Values[0].Cost.TotalCost.Value
 	}
 	// check totals of all services is same as total in meta
 	if math.Round(total*100)/100 != math.Round(response.Meta.Total.Cost.TotalCost.Value*100)/100 {
-		return 0, fmt.Errorf("total cost differs from meta and total of services (%f vs %f)", response.Meta.Total.Cost.TotalCost.Value, total)
+		return 0, fmt.Errorf(
+			"total cost differs from meta and total of services (%f vs %f)",
+			response.Meta.Total.Cost.TotalCost.Value,
+			total,
+		)
 	}
-	// check account meta deviation if standardvalue is given
+	// check account meta deviation if standard value is given
 	if account.Standardvalue > 0 {
 		diff := account.Standardvalue - total
 		diffAbs := math.Abs(diff)
 		diffPercent := (diffAbs / account.Standardvalue) * 100
 		if diffPercent > float64(account.Deviationpercent) {
-			return total, fmt.Errorf("deviation check failed: deviation is %.2f (%.2f%%), max deviation allowed is %d%% (value was %.2f, standard value %.2f)", diffAbs, diffPercent, account.Deviationpercent, total, account.Standardvalue)
+			return total, fmt.Errorf(
+				"deviation check failed: deviation is %.2f (%.2f%%), max deviation allowed is %d%% (value was %.2f, standard value %.2f)",
+				diffAbs,
+				diffPercent,
+				account.Deviationpercent,
+				total,
+				account.Standardvalue,
+			)
 		}
 	}
 	return total, nil

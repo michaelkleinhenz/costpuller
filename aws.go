@@ -11,31 +11,33 @@ import (
 	"github.com/aws/aws-sdk-go/service/costexplorer"
 	"github.com/aws/aws-sdk-go/service/organizations"
 	"github.com/jinzhu/now"
+	"google.golang.org/api/sheets/v4"
 )
 
-const AWSTagCostpullerCategory = "costpuller_category"
+const AwsTagCostpullerCategory = "costpuller_category"
 
-const AWSMetadataDescription = "description"
-const AWSMetadataStatus = "status"
+const AwsMetadataDescription = "description"
+const AwsMetadataStatus = "status"
 
-// AWSPuller implements the AWS query client
-type AWSPuller struct {
+// AwsPuller implements the AWS query client
+type AwsPuller struct {
 	session *session.Session
-	debug bool
+	debug   bool
 }
 
-// NewAWSPuller returns a new AWS client.
-func NewAWSPuller(debug bool) *AWSPuller {
-	awsp := new(AWSPuller)
+// NewAwsPuller returns a new AWS client.
+func NewAwsPuller(profile string, debug bool) *AwsPuller {
+	awsp := new(AwsPuller)
 	awsp.session = session.Must(session.NewSessionWithOptions(session.Options{
-    SharedConfigState: session.SharedConfigEnable,
+		Profile:           profile,
+		SharedConfigState: session.SharedConfigEnable,
 	}))
 	awsp.debug = debug
 	return awsp
 }
 
 // PullData retrieves a raw data set.
-func (a *AWSPuller) PullData(accountID string, month string, costType string) (map[string]float64, error) {
+func (a *AwsPuller) PullData(accountID string, month string, costType string) (map[string]float64, error) {
 	// check month format
 	focusMonth, err := time.Parse("2006-01", month)
 	if err != nil {
@@ -46,12 +48,9 @@ func (a *AWSPuller) PullData(accountID string, month string, costType string) (m
 	endOfMonth := now.With(focusMonth).EndOfMonth().Add(time.Hour * 24)
 	dayStart := beginningOfMonth.Format("2006-01-02")
 	dayEnd := endOfMonth.Format("2006-01-02")
-	log.Printf("[pullawsdata] using date range %s to %s", dayStart, dayEnd)
 	// retrieve AWS cost
 	svc := costexplorer.New(a.session)
 	granularity := "MONTHLY"
-	metricsBlendedCost := costType
-	log.Printf("[pullawsdata] using cost type %s", metricsBlendedCost)
 	dimensionLinkedAccountKey := "LINKED_ACCOUNT"
 	dimensionLinkedAccountValue := accountID
 	groupByDimension := "DIMENSION"
@@ -59,20 +58,20 @@ func (a *AWSPuller) PullData(accountID string, month string, costType string) (m
 	costAndUsageService, err := svc.GetCostAndUsage(&costexplorer.GetCostAndUsageInput{
 		TimePeriod: &costexplorer.DateInterval{
 			Start: &dayStart,
-			End: &dayEnd,
+			End:   &dayEnd,
 		},
 		Granularity: &granularity,
-		Metrics: []*string{&metricsBlendedCost},
+		Metrics:     []*string{&costType},
 		Filter: &costexplorer.Expression{
 			Dimensions: &costexplorer.DimensionValues{
-				Key: &dimensionLinkedAccountKey,
+				Key:    &dimensionLinkedAccountKey,
 				Values: []*string{&dimensionLinkedAccountValue},
 			},
 		},
 		GroupBy: []*costexplorer.GroupDefinition{
-			&costexplorer.GroupDefinition{
+			{
 				Type: &groupByDimension,
-				Key: &groupByService,
+				Key:  &groupByService,
 			},
 		},
 	})
@@ -87,13 +86,13 @@ func (a *AWSPuller) PullData(accountID string, month string, costType string) (m
 	costAndUsageTotal, err := svc.GetCostAndUsage(&costexplorer.GetCostAndUsageInput{
 		TimePeriod: &costexplorer.DateInterval{
 			Start: &dayStart,
-			End: &dayEnd,
+			End:   &dayEnd,
 		},
 		Granularity: &granularity,
-		Metrics: []*string{&metricsBlendedCost},
+		Metrics:     []*string{&costType},
 		Filter: &costexplorer.Expression{
 			Dimensions: &costexplorer.DimensionValues{
-				Key: &dimensionLinkedAccountKey,
+				Key:    &dimensionLinkedAccountKey,
 				Values: []*string{&dimensionLinkedAccountValue},
 			},
 		},
@@ -107,13 +106,13 @@ func (a *AWSPuller) PullData(accountID string, month string, costType string) (m
 		log.Println(*costAndUsageTotal)
 	}
 	// decode total value
-	totalAWSStr := *(*(*costAndUsageTotal.ResultsByTime[0]).Total[metricsBlendedCost]).Amount
+	totalAWSStr := *costAndUsageTotal.ResultsByTime[0].Total[costType].Amount
 	totalAWS, err := strconv.ParseFloat(totalAWSStr, 64)
 	if err != nil {
 		log.Printf("[pullawsdata] error converting aws total value: %v", err)
 		return nil, err
 	}
-	unitAWS := *(*(*costAndUsageTotal.ResultsByTime[0]).Total[metricsBlendedCost]).Unit
+	unitAWS := *costAndUsageTotal.ResultsByTime[0].Total[costType].Unit
 	if unitAWS != "USD" {
 		log.Printf("[pullawsdata] pulled unit is not USD: %s", unitAWS)
 		return nil, fmt.Errorf("pulled unit is not USD: %s", unitAWS)
@@ -123,21 +122,35 @@ func (a *AWSPuller) PullData(accountID string, month string, costType string) (m
 	serviceResults := make(map[string]float64)
 	resultsByTime := costAndUsageService.ResultsByTime
 	if len(resultsByTime) != 1 {
-		log.Printf("[pullawsdata] warning account %s does not have exactly one service results by time (has %d)", accountID, len(resultsByTime))
+		log.Printf(
+			"[pullawsdata] warning account %s does not have exactly one service results by time (has %d)",
+			accountID,
+			len(resultsByTime),
+		)
 		return serviceResults, nil
 	}
 	serviceGroups := resultsByTime[0].Groups
-	for _, group := range(serviceGroups) {
+	for _, group := range serviceGroups {
 		if len(group.Keys) != 1 {
-			log.Printf("[pullawsdata] warning account %s service group does not have exactly one key", accountID)
-			return serviceResults, fmt.Errorf("[pullawsdata] warning account %s service group does not have exactly one key", accountID)
+			err := fmt.Errorf(
+				"[pullawsdata] warning account %s service group does not have exactly one key",
+				accountID,
+			)
+			log.Printf(err.Error())
+			return serviceResults, err
 		}
 		key := group.Keys[0]
 		valueStr := group.Metrics[costType].Amount
 		unit := group.Metrics[costType].Unit
 		if *unit != unitAWS {
-			log.Printf("[pullawsdata] error: inconsistent units (%s vs %s) for account %s", unitAWS, *unit, accountID)
-			return nil, fmt.Errorf("[pullawsdata] error: inconsistent units (%s vs %s) for account %s", unitAWS, *unit, accountID)
+			err := fmt.Errorf(
+				"[pullawsdata] error: inconsistent units (%s vs %s) for account %s",
+				unitAWS,
+				*unit,
+				accountID,
+			)
+			log.Printf(err.Error())
+			return nil, err
 		}
 		value, err := strconv.ParseFloat(*valueStr, 64)
 		if err != nil {
@@ -147,91 +160,110 @@ func (a *AWSPuller) PullData(accountID string, month string, costType string) (m
 		serviceResults[*key] = value
 		totalService += value
 	}
-	if math.Round(totalService*100)/100 != math.Round(totalAWS*100)/100  {
-		log.Printf("[pullawsdata] error: account %s service total %f does not match aws total %f", accountID, totalService, totalAWS)
-		return nil, fmt.Errorf("[pullawsdata] error: account %s service total %f does not match aws total %f", accountID, totalService, totalAWS)
+	if math.Round(totalService*100)/100 != math.Round(totalAWS*100)/100 {
+		err := fmt.Errorf(
+			"[pullawsdata] error: account %s service total %f does not match aws total %f",
+			accountID,
+			totalService,
+			totalAWS,
+		)
+		log.Printf(err.Error())
+		return nil, err
 	}
 	return serviceResults, nil
 }
 
 // NormalizeResponse normalizes a Response object data into report categories.
-func (a *AWSPuller) NormalizeResponse(group string, daterange string, accountID string, serviceResults map[string]float64) ([]string, error) {
-	// format is: 
-	// group, date, clusterId, accountId, PO, clusterType, usageType, product, infra, numberUsers, dataTransfer, machines, storage, keyMgmnt, registrar, dns, other, tax, refund
-
-	// remove: 2 4 5 6 7 9 
-	output := make([]string, 13)
-	for idx := range(output) {
-		output[idx] = "PENDING"
-	}
+func (a *AwsPuller) NormalizeResponse(
+	group string,
+	dateRange string,
+	accountID string,
+	serviceResults map[string]float64,
+) (*sheets.RowData, error) {
+	// Format is:
+	//   [0-9]    group, date, clusterId, accountId, PO, clusterType, usageType, product, infra, numberUsers,
+	//   [10-18]  dataTransfer, machines, storage, keyMgmnt, registrar, dns, other, tax, rebate
+	// Select entries 0, 1, 3, 8, and 10-18; omit entries 2, 4, 5, 6, 7, and 9
+	output := sheets.RowData{Values: make([]*sheets.CellData, 13)}
 	// set group
-	output[0] = group
-	// infra is always AWS
-	output[3] = "AWS"
+	output.Values[0] = newStringCell(group)
 	// set date - we use the first service entry
-	output[1] = daterange
-	// set clusterID
-	output[2] = accountID
-	// init cost values
-	output[4] = "0"
-	output[5] = "0"
-	output[6] = "0"
-	output[7] = "0"
-	output[8] = "0"
-	output[9] = "0"
-	output[10] = "0"
-	output[11] = "0"
-	output[12] = "0"	
-	// nomalize cost values
+	output.Values[1] = newStringCell(dateRange)
+	// skip clusterId; set the accountId
+	output.Values[2] = newStringCell(accountID)
+	// skip PO, clusterType, usageType, and product; infra is always AWS
+	output.Values[3] = newStringCell("AWS")
+
+	// skip numberUsers; pick out and set the values for dataTransfer, storage,
+	// dns, and tax; sum the remaining values into categories for machines,
+	// keyMgmnt, and "other".
 	var ec2Val float64 = 0
 	var kmVal float64 = 0
 	var otherVal float64 = 0
-	for key, value := range(serviceResults) {
+
+	// set default values, in case they are omitted from the data
+	output.Values[4] = newNumberCell(0.0)
+	output.Values[6] = newNumberCell(0.0)
+	output.Values[9] = newNumberCell(0.0)
+	output.Values[11] = newNumberCell(0.0)
+
+	for key, value := range serviceResults {
 		switch key {
 		case "AWS Data Transfer":
-			output[4] = fmt.Sprintf("%f", value)
+			output.Values[4] = newNumberCell(value)
 		case "Amazon Elastic Compute Cloud - Compute":
 			ec2Val += value
 		case "EC2 - Other":
 			ec2Val += value
 		case "Amazon Simple Storage Service":
-			output[6] = fmt.Sprintf("%f", value)
+			output.Values[6] = newNumberCell(value)
 		case "AWS Key Management Service":
 			kmVal += value
 		case "AWS Secrets Manager":
 			kmVal += value
 		case "Amazon Route 53":
-			output[9] = fmt.Sprintf("%f", value)
+			output.Values[9] = newNumberCell(value)
 		case "Tax":
-			output[11] = fmt.Sprintf("%f", value)
+			output.Values[11] = newNumberCell(value)
 		default:
 			otherVal += value
 		}
 	}
-	// EC2
-	output[5] = fmt.Sprintf("%f", ec2Val)
+	// EC2 ("machines")
+	output.Values[5] = newNumberCell(ec2Val)
 	// key management
-	output[7] = fmt.Sprintf("%f", kmVal)
-	// store other total
-	output[10] = fmt.Sprintf("%f", otherVal)
-	return output, nil
+	output.Values[7] = newNumberCell(kmVal)
+	// registrar (always zero??)
+	output.Values[8] = newNumberCell(0.0)
+	// "other" total
+	output.Values[10] = newNumberCell(otherVal)
+	// rebate (always zero??)
+	output.Values[12] = newNumberCell(0.0)
+	return &output, nil
 }
 
 // CheckResponseConsistency checks the response consistency with various checks. Returns the calculated total.
-func (a *AWSPuller) CheckResponseConsistency(account AccountEntry, results map[string]float64) (float64, error) {
+func (a *AwsPuller) CheckResponseConsistency(account AccountEntry, results map[string]float64) (float64, error) {
 	var total float64 = 0
-	for _, value := range(results) {
+	for _, value := range results {
 		// add up value
 		total += value
 	}
-	// check account meta deviation if standardvalue is given
+	// check account meta deviation if standard value is given
 	if account.Standardvalue > 0 {
 		diff := account.Standardvalue - total
 		diffAbs := math.Abs(diff)
 		diffPercent := (diffAbs / account.Standardvalue) * 100
 		if diffPercent > float64(account.Deviationpercent) {
-			return total, fmt.Errorf("deviation check failed: deviation is %.2f (%.2f%%), max deviation allowed is %d%% (value was %.2f, standard value %.2f)", diffAbs, diffPercent, account.Deviationpercent, total, account.Standardvalue)
-		}	
+			return total, fmt.Errorf(
+				"deviation check failed: deviation is %.2f (%.2f%%), max deviation allowed is %d%% (value was %.2f, standard value %.2f)",
+				diffAbs,
+				diffPercent,
+				account.Deviationpercent,
+				total,
+				account.Standardvalue,
+			)
+		}
 	}
 	if a.debug {
 		log.Println("[CheckResponseConsistency] service struct:")
@@ -241,19 +273,19 @@ func (a *AWSPuller) CheckResponseConsistency(account AccountEntry, results map[s
 	return total, nil
 }
 
-// GetAWSAccountMetadata returns a map with accountIDs as keys and metadata key-value pairs map as value.
-func (a *AWSPuller) GetAWSAccountMetadata() (map[string]map[string]string, error) {
+// GetAwsAccountMetadata returns a map with accountIDs as keys and metadata key-value pairs map as value.
+func (a *AwsPuller) GetAwsAccountMetadata() (map[string]map[string]string, error) {
 	// get account list and basic metadata
 	accounts, err := a.getAllAWSAccountData()
 	if err != nil {
 		return nil, err
 	}
 	// augment tags
-	log.Println("[GetAWSAccountMetadata] starting tags pull for accounts")
+	log.Println("[GetAwsAccountMetadata] starting tags pull for accounts")
 	idx := 0
-	for accountID, _ := range accounts { 
+	for accountID := range accounts {
 		idx++
-		log.Printf("[GetAWSAccountMetadata] pulling tags for account %s (%d of %d)", accountID, idx, len(accounts))
+		log.Printf("[GetAwsAccountMetadata] pulling tags for account %s (%d of %d)", accountID, idx, len(accounts))
 
 		tags, err := a.getTagsForAWSAccount(accountID)
 		if err != nil {
@@ -266,7 +298,7 @@ func (a *AWSPuller) GetAWSAccountMetadata() (map[string]map[string]string, error
 	return accounts, nil
 }
 
-func (a *AWSPuller) getTagsForAWSAccount(accountID string) (map[string]string, error) {
+func (a *AwsPuller) getTagsForAWSAccount(accountID string) (map[string]string, error) {
 	result := map[string]string{}
 	svo := organizations.New(a.session)
 	output, err := svo.ListTagsForResource(&organizations.ListTagsForResourceInput{
@@ -296,7 +328,11 @@ func (a *AWSPuller) getTagsForAWSAccount(accountID string) (map[string]string, e
 	return result, nil
 }
 
-func (a *AWSPuller) pullAccountData(svo *organizations.Organizations, result *map[string]map[string]string, nextToken *string) (*string, error) {
+func (a *AwsPuller) pullAccountData(
+	svo *organizations.Organizations,
+	result *map[string]map[string]string,
+	nextToken *string,
+) (*string, error) {
 	limit := int64(10)
 	output, err := svo.ListAccounts(&organizations.ListAccountsInput{
 		MaxResults: &limit,
@@ -308,14 +344,14 @@ func (a *AWSPuller) pullAccountData(svo *organizations.Organizations, result *ma
 	}
 	for _, e := range output.Accounts {
 		(*result)[*e.Id] = map[string]string{
-			AWSMetadataDescription: *e.Name,
-			AWSMetadataStatus: *e.Status,
+			AwsMetadataDescription: *e.Name,
+			AwsMetadataStatus:      *e.Status,
 		}
-	}		
+	}
 	return output.NextToken, nil
 }
 
-func (a *AWSPuller) getAllAWSAccountData() (map[string]map[string]string, error) {
+func (a *AwsPuller) getAllAWSAccountData() (map[string]map[string]string, error) {
 	result := map[string]map[string]string{}
 	svo := organizations.New(a.session)
 	log.Println("[pullawsdata] pulling all accounts metadata")
@@ -335,22 +371,19 @@ func (a *AWSPuller) getAllAWSAccountData() (map[string]map[string]string, error)
 	return result, nil
 }
 
-func (a *AWSPuller) WriteAWSTags(accounts map[string][]AccountEntry) (error) {
+func (a *AwsPuller) WriteAwsTags(accounts map[string][]AccountEntry) error {
 	svo := organizations.New(a.session)
-	catgoryTag := AWSTagCostpullerCategory
+	categoryTag := AwsTagCostpullerCategory
 	for category, accountEntries := range accounts {
 		for _, accountEntry := range accountEntries {
-			fmt.Printf("setting tag %s == %s for account %s...", catgoryTag, category, accountEntry.AccountID)
+			fmt.Printf("setting tag %s == %s for account %s...", categoryTag, category, accountEntry.AccountID)
 			if !a.debug {
 				_, err := svo.TagResource(&organizations.TagResourceInput{
 					ResourceId: &accountEntry.AccountID,
-					Tags:       []*organizations.Tag{
-						&organizations.Tag{
-							Key: &catgoryTag, 
-							Value: &category,	
-						},
+					Tags: []*organizations.Tag{
+						{Key: &categoryTag, Value: &category},
 					},
-				})	
+				})
 				if err != nil {
 					return err
 				}
@@ -361,4 +394,12 @@ func (a *AWSPuller) WriteAWSTags(accounts map[string][]AccountEntry) (error) {
 		}
 	}
 	return nil
+}
+
+func newStringCell(val string) *sheets.CellData {
+	return &sheets.CellData{UserEnteredValue: &sheets.ExtendedValue{StringValue: &val}}
+}
+
+func newNumberCell(val float64) *sheets.CellData {
+	return &sheets.CellData{UserEnteredValue: &sheets.ExtendedValue{NumberValue: &val}}
 }
